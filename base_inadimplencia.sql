@@ -215,6 +215,7 @@ SELECT
   f.cadastros_com_bomba,
 
   d.em_atraso,
+  d.faturas_vencidas,       -- casa com o DOC da aba ACORDOS (cortado no '/')
   d.titulos_abertos,
   d.titulos_x90,
   d.valor_x90,
