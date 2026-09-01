@@ -154,6 +154,10 @@ divida AS (
     COUNT(DISTINCT DATE_TRUNC(a.venc, MONTH))          AS frequencia_propria,
     COUNT(*)                                           AS titulos_abertos,
     ROUND(SUM(a.em_aberto), 2)                         AS em_atraso,
+    -- Faturas vencidas, para casar com o DOC da aba ACORDOS (que grava
+    -- fatura+parcela; lá o split corta no '/').
+    STRING_AGG(DISTINCT CAST(a.fatura AS STRING), ';'
+               ORDER BY CAST(a.fatura AS STRING))      AS faturas_vencidas,
     COUNTIF(a.baixa_contabil)                          AS titulos_x90,
     ROUND(SUM(IF(a.baixa_contabil, a.em_aberto, 0)), 2) AS valor_x90,
     -- Cliente cuja dívida é SÓ X90 é invisível para a silver e para a gold.
