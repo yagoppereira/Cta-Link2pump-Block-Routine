@@ -38,6 +38,23 @@
 
 DECLARE dias_uso_recente INT64 DEFAULT 90;
 
+-- O GRUPO DÁ O SINAL, O CADASTRO PRECISA MERECER.
+--
+-- Duas correções na frequência de grupo, ambas pelo mesmo motivo: a frequência
+-- serve para descrever o comportamento do grupo, não para condenar qualquer
+-- CNPJ que pertença a ele.
+--
+--   1. Só cadastro COM BOMBA entra no cálculo do grupo. Uma filial sem
+--      equipamento, com dívida de venda avulsa, inflava a frequência e
+--      arrastava os cadastros operacionais junto. Afeta 27 grupos.
+--
+--   2. frequencia_propria_minima. Sem ela, um cadastro que deve UM mês entra
+--      porque um irmão deve nove: IPIRANGA (própria 1, grupo 18), Aço Verde
+--      1588 (1 e 9), Durlicouros 3695 (1 e 8), HOK (1 e 7).
+--
+-- Medido em freq_grupo >= 7: a regra sem as correções pega 30 clientes; com as
+-- duas, 17. Nove dos que saem deviam dois meses ou menos.
+
 WITH emp AS (
   SELECT
     codigo,
@@ -109,13 +126,23 @@ abertos AS (
       AND t.codigoEmpresa NOT IN (SELECT codigoEmpresa FROM sob_tutela_juridica)
 ),
 
+-- Quem tem parque instalado: só esses contam para a frequência do grupo.
+cadastros_com_bomba AS (
+  SELECT DISTINCT cliente_cigam_pagante AS codigo
+  FROM `hip-bonito-453017-m2.gold.bombas_alocadas`
+),
+
 freq_grupo AS (
   SELECT
     e.raiz,
-    COUNT(DISTINCT DATE_TRUNC(a.venc, MONTH)) AS frequencia,
-    COUNT(DISTINCT e.codigo)                  AS cadastros_no_grupo
+    COUNT(DISTINCT IF(cb.codigo IS NOT NULL,
+                      DATE_TRUNC(a.venc, MONTH), NULL))        AS frequencia,
+    COUNT(DISTINCT DATE_TRUNC(a.venc, MONTH))                  AS frequencia_grupo_bruta,
+    COUNT(DISTINCT e.codigo)                                   AS cadastros_no_grupo,
+    COUNT(DISTINCT IF(cb.codigo IS NOT NULL, e.codigo, NULL))  AS cadastros_com_bomba
   FROM abertos a
   JOIN emp e ON e.codigo = a.codigoEmpresa
+  LEFT JOIN cadastros_com_bomba cb ON cb.codigo = a.codigoEmpresa
   WHERE a.venc < CURRENT_DATE('America/Sao_Paulo')
   GROUP BY 1
 ),
@@ -177,9 +204,11 @@ SELECT
   e.cnpj,
   e.raiz                                    AS cnpj_raiz,
 
-  f.frequencia,                             -- do GRUPO — é a da régua
-  d.frequencia_propria,                     -- só deste cadastro
+  f.frequencia,                             -- do GRUPO, só cadastros com bomba
+  d.frequencia_propria,                     -- só deste cadastro — precisa merecer
+  f.frequencia_grupo_bruta,                 -- com os sem-bomba, para comparar
   f.cadastros_no_grupo,
+  f.cadastros_com_bomba,
 
   d.em_atraso,
   d.titulos_abertos,
