@@ -587,7 +587,17 @@ def _num(linha: dict) -> dict:
     """Sheets devolve tudo string. Converte o que o template precisa como número."""
     d = dict(linha)
     for k in ("saldo", "encargos", "total"):
-        d[k] = float(str(d.get(k) or 0).replace(",", ".") or 0)
+        bruto = str(d.get(k) or 0).strip().replace(".", "").replace(",", ".")
+        try:
+            d[k] = float(bruto or 0)
+        except ValueError:
+            raise ValueError(
+                f"Coluna '{k}' da Campanha_Titulos veio como {d.get(k)!r}, que "
+                f"não é número. Quase sempre é FORMATO de célula: o Sheets "
+                f"exibe 120,38 como 1900-04-29 quando a coluna herdou formato "
+                f"de data. Rode preparar() de novo com o io_sheets atualizado, "
+                f"que limpa a formatação antes de escrever."
+            ) from None
     d["dias_atraso"] = int(float(d.get("dias_atraso") or 0))
     if isinstance(d.get("datavencimento") or d.get("dataVencimento"), str):
         v = d.get("datavencimento") or d.get("dataVencimento")
