@@ -234,26 +234,35 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     # Acordos: quem está pagando sai; quem QUEBROU fica e é marcado.
     # Sem este cruzamento, o disparo manda aviso de bloqueio para cliente que
     # está honrando um acordo — o pior erro possível numa régua de cobrança.
+    import acordos as ac
     try:
-        import acordos as ac
-        reg = ac.carregar(gc, io)
-        print(reg.resumo())
-        docs = {r.codigo: str(r.faturas_vencidas or "").split(";")
-                for r in df.itertuples()}
-        df, fora_acordo = ac.aplicar(df, reg, docs_por_cliente=docs)
-        if len(fora_acordo):
-            elegivel = fora_acordo[(fora_acordo.frequencia >= freq_minima)
-                                   & (fora_acordo.frequencia_propria >= freq_propria_minima)]
-            print(f"  {len(elegivel)} candidato(s) fora por acordo vigente "
-                  f"(R$ {elegivel.em_atraso.astype(float).sum():,.2f}):")
-            for r in elegivel.itertuples():
-                print(f"     {r.codigo} {str(r.cliente)[:30]:<30} {r.status_acordo}")
+        reg = ac.carregar(gc, io)      # só a LEITURA entra no try
     except Exception as exc:
         raise RuntimeError(
             f"Não consegui ler a aba ACORDOS ({type(exc).__name__}: {exc}).\n"
             f"Isto NÃO é opcional: sem o cruzamento, o disparo notifica cliente "
-            f"que está pagando acordo. Corrija o acesso antes de seguir."
+            f"que está pagando acordo. Compartilhe a planilha com a conta que "
+            f"você usa no Colab."
         ) from exc
+
+    print(reg.resumo())
+    if not reg.por_cliente:
+        raise RuntimeError(
+            "A aba ACORDOS foi lida mas devolveu ZERO clientes. Isso quase "
+            "sempre é cabeçalho ou nome de coluna diferente do esperado — não "
+            "é 'ninguém tem acordo'. Confira antes de seguir."
+        )
+
+    docs = {r.codigo: str(getattr(r, "faturas_vencidas", "") or "").split(";")
+            for r in df.itertuples()}
+    df, fora_acordo = ac.aplicar(df, reg, docs_por_cliente=docs)
+    if len(fora_acordo):
+        elegivel = fora_acordo[(fora_acordo.frequencia >= freq_minima)
+                               & (fora_acordo.frequencia_propria >= freq_propria_minima)]
+        print(f"  {len(elegivel)} candidato(s) fora por acordo ou estado indefinido "
+              f"(R$ {elegivel.em_atraso.astype(float).sum():,.2f}):")
+        for r in elegivel.itertuples():
+            print(f"     {r.codigo} {str(r.cliente)[:30]:<30} {r.status_acordo}")
 
     dentro = df[qualificado.reindex(df.index, fill_value=False)
                 & (df.usa_equipamento == True)]
