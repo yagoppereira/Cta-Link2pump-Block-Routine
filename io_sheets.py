@@ -183,9 +183,24 @@ def escrever_aba(planilha, nome: str, df, limpar: bool = True):
                        rows=str(n_linhas), cols=str(n_colunas))
         print(f"  aba '{nome}' criada")
 
-    com_retry(set_with_dataframe, ws, _para_sheets(df),
+    # Descongela ANTES de escrever. Com resize=True e um DataFrame vazio, o
+    # gspread tenta encolher a aba para 1 linha — a do cabeçalho, congelada
+    # pela execução anterior — e o Google recusa: "Não é possível excluir todas
+    # as linhas não congeladas". Ou seja, a Triagem sair VAZIA (o melhor
+    # resultado possível) derrubava a rodada inteira.
+    com_retry(ws.freeze, rows=0)
+
+    pronto = _para_sheets(df)
+    com_retry(set_with_dataframe, ws, pronto,
               include_index=False, include_column_header=True,
               resize=True)   # <- não remova
+
+    if len(pronto) == 0:
+        # Aba só com cabeçalho: garante espaço para congelar a primeira linha
+        # e deixa explícito que o vazio é resultado, não falha de escrita.
+        com_retry(ws.resize, rows=2, cols=max(len(df.columns), 1))
+        com_retry(ws.update, "A2", [["(nenhum registro nesta campanha)"]])
+
     com_retry(ws.freeze, rows=1)
     return ws
 
