@@ -21,8 +21,7 @@ em nenhum teste — e é onde mora o resize=True, que já causou perda silencios
 
 from datetime import date
 
-ABAS_P1 = ["Campanha_Input", "Email_Vendedores"]
-ABAS_P2 = ["Base_Clientes"]
+ABAS_P1 = ["Campanha_Input", "Email_Vendedores", "Contatos_Emails"]
 ABA_RASCUNHO = "_preflight_apagar"
 
 _ok, _falhas = [], []
@@ -76,7 +75,6 @@ def rodar(codigos_teste=("000337", "003106", "002786")) -> bool:
     planilhas = {}
     for rotulo, sid, obrigatorias in (
         ("planilha 1 (destino)", main.ID_DESTINO, ABAS_P1),
-        ("planilha 2 (vendedores, leitura)", main.ID_VENDEDORES, ABAS_P2),
     ):
         try:
             p = io.abrir(gc, sid)
@@ -94,7 +92,6 @@ def rodar(codigos_teste=("000337", "003106", "002786")) -> bool:
 
     _passo("5. conteúdo das abas")
     p1 = planilhas.get("planilha 1 (destino)")
-    p2 = planilhas.get("planilha 2 (vendedores, leitura)")
 
     if p1:
         entrada = io.ler_aba(p1, "Campanha_Input", obrigatoria=False)
@@ -108,6 +105,13 @@ def rodar(codigos_teste=("000337", "003106", "002786")) -> bool:
             else:
                 _falha(f"   nenhuma coluna 'cliente'/'cnpj'/'codigo'. Tem: "
                        f"{', '.join(sorted(cols))}")
+            if "status" in cols:
+                from collections import Counter
+                cont = Counter(str(l.get("status","")).strip().upper() for l in entrada)
+                _ok_("   status: " + ", ".join(f"{v} {k}" for k, v in cont.most_common()))
+            else:
+                _falha("   sem coluna 'status': renegociado e acordo NÃO seriam "
+                       "barrados. Use main.ingerir_lista() para montar a aba.")
 
         vend = io.ler_aba(p1, "Email_Vendedores", obrigatoria=False)
         import vendedores as V
@@ -115,19 +119,17 @@ def rodar(codigos_teste=("000337", "003106", "002786")) -> bool:
         (_ok_ if com_email else _falha)(
             f"Email_Vendedores: {len(vend)} linha(s), {len(com_email)} com e-mail válido")
 
-    if p2:
-        base = io.ler_aba(p2, "Base_Clientes", obrigatoria=False)
-        if not base:
-            _falha("Base_Clientes vazia — rode o Apps Script na planilha 2")
+        contatos = io.ler_aba(p1, "Contatos_Emails", obrigatoria=False)
+        if not contatos:
+            _falha("Contatos_Emails vazia — é dela que sai o vendedor de cada cliente")
         else:
-            cols = set(base[0])
-            faltando = {"empresa_cnpj_cpf", "vendedor"} - cols
+            cols = set(contatos[0])
+            faltando = {"codigo_cliente", "vendedor"} - cols
             (_falha if faltando else _ok_)(
-                f"Base_Clientes: {len(base)} linha(s)"
+                f"Contatos_Emails: {len(contatos)} linha(s)"
                 + (f" — FALTA coluna {faltando}" if faltando else ""))
-            if "regra_atribuicao" not in cols:
-                _falha("   sem 'regra_atribuicao': todo vendedor entraria como "
-                       "não classificado e ninguém iria em cópia")
+            if not faltando:
+                print("\n" + V.conferir_catalogo(contatos, vend))
 
     _passo("6. queries (dry_run: valida sem custo e sem ler linha)")
     from google.cloud import bigquery
