@@ -27,6 +27,7 @@ confirmada contra a planilha real. Rode a fase A com 2 ou 3 clientes antes.
 """
 
 from datetime import date
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -58,6 +59,7 @@ ABA_BOMBAS = "Campanha_Bombas"
 ABA_LOG = "Campanha_Log"
 ABA_TRIAGEM = "Triagem"
 ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
+ABA_EXCECOES = "Nunca_Notificar"
 ABA_EMAIL_VEND = "Email_Vendedores"
 ABA_CONTATOS = "Contatos_Emails"        # traz a coluna `vendedor` já resolvida
 
@@ -188,10 +190,42 @@ def candidatos(gc, bq, freq_minima: int = 7, dias_uso: int = 90,
     dias_uso:    janela do último abastecimento. Cliente sem alocação sai com
                  uso desconhecido e NÃO entra automaticamente.
     """
+    p1 = io.abrir(gc, ID_DESTINO)
+
+    # Política permanente, não decisão de campanha. Conta grande, contrato
+    # especial ou cliente sob acordo guarda-chuva sai TODA rodada — vetar os
+    # mesmos na coluna `acao` a cada campanha é trabalho repetido que uma hora
+    # alguém esquece, e o esquecimento manda aviso de bloqueio para a Ipiranga.
+    #
+    # Aba Nunca_Notificar: chave | motivo
+    #   chave = código CIGAM (006 dígitos) OU raiz de CNPJ (8 dígitos)
+    #   a raiz pega o grupo inteiro de uma vez: Aço Verde tem 4 cadastros,
+    #   Rio Itá 4, Translovato 5 — listar um a um envelhece mal.
+    excecoes = io.ler_aba(p1, ABA_EXCECOES, obrigatoria=False)
+    bloqueados, motivo_de = set(), {}
+    for l in excecoes:
+        chave = re.sub(r"\D", "", str(l.get("chave") or l.get("codigo") or ""))
+        if not chave:
+            continue
+        chave = chave.zfill(6) if len(chave) <= 6 else chave[:8]
+        bloqueados.add(chave)
+        motivo_de[chave] = str(l.get("motivo") or "").strip() or "sem motivo informado"
+
     sql = (SQL / "base_inadimplencia.sql").read_text()
     sql = sql.replace("DECLARE dias_uso_recente INT64 DEFAULT 90;",
                       f"DECLARE dias_uso_recente INT64 DEFAULT {int(dias_uso)};")
     df = bq.query(sql).to_dataframe(create_bqstorage_client=False)
+
+    if bloqueados:
+        na_lista = df.codigo.isin(bloqueados) | df.cnpj_raiz.isin(bloqueados)
+        vetados = df[na_lista]
+        df = df[~na_lista]
+        if len(vetados):
+            print(f"{len(vetados)} cadastro(s) fora por '{ABA_EXCECOES}' "
+                  f"(R$ {vetados.em_atraso.astype(float).sum():,.2f}):")
+            for r in vetados.itertuples():
+                chave = r.codigo if r.codigo in motivo_de else r.cnpj_raiz
+                print(f"   {r.codigo} {str(r.cliente)[:32]:<32} {motivo_de.get(chave,'')}")
 
     dentro = df[(df.frequencia >= freq_minima) & (df.usa_equipamento == True)]
     sem_uso = df[(df.frequencia >= freq_minima) & (df.usa_equipamento.isna())]
@@ -207,7 +241,6 @@ def candidatos(gc, bq, freq_minima: int = 7, dias_uso: int = 90,
 
     if escrever and len(dentro):
         import pandas as pd
-        p1 = io.abrir(gc, ID_DESTINO)
         saida = dentro.copy()
         saida.insert(0, "acao", "")          # em branco = entra
         io.escrever_aba(p1, ABA_INPUT, saida)
