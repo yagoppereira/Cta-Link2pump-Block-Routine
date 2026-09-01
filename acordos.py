@@ -143,7 +143,11 @@ def carregar(gc, io_sheets, spreadsheet_id: str = ACORDOS_SPREADSHEET_ID,
              aba: str = ACORDOS_ABA) -> Acordos:
     """Lê a aba ACORDOS e agrega por cliente."""
     planilha = io_sheets.abrir(gc, spreadsheet_id)
-    linhas = io_sheets.ler_aba(planilha, aba)
+    # O cabeçalho não está na linha 1: acima dele há uma linha de totais.
+    linhas = io_sheets.ler_aba_procurando_cabecalho(
+        planilha, aba, obrigatorias=["EMPRESA", "STATUS ACORDO", "DOC"])
+    if not linhas:
+        raise RuntimeError(f"Aba '{aba}' sem registros abaixo do cabeçalho.")
 
     a = Acordos()
     for l in linhas:
