@@ -70,6 +70,47 @@ def ler_aba(planilha, nome: str, obrigatoria: bool = True) -> list:
     return linhas
 
 
+def _texto_celula(v):
+    """Valor -> texto para a célula. Data sem hora sai como AAAA-MM-DD em vez
+    de '2026-08-31 00:00:00', que polui a planilha."""
+    import datetime as _dt
+    import pandas as pd
+
+    if v is None or v is pd.NaT:
+        return ""
+    if isinstance(v, float) and pd.isna(v):
+        return ""
+    if isinstance(v, _dt.datetime):
+        return v.date().isoformat() if (v.hour, v.minute, v.second) == (0, 0, 0) \
+               else v.isoformat(sep=" ", timespec="seconds")
+    if isinstance(v, _dt.date):
+        return v.isoformat()
+    return str(v)
+
+
+def _para_sheets(df):
+    """Prepara o DataFrame para o Sheets sem quebrar tipos exóticos.
+
+    `df.fillna("")` parece inofensivo e não é: colunas DATE vindas do BigQuery
+    chegam como `dbdate`, e enfiar string vazia nelas estoura com
+    "Bad date string: ''" quando o gspread lê os valores de volta.
+
+    Numérico e booleano passam intactos, para o Sheets receber número como
+    número. O resto vira texto via map — que não depende do dtype e por isso
+    funciona igual para dbdate, datetime, Decimal ou object.
+    """
+    import pandas as pd
+
+    saida = df.copy()
+    for col in saida.columns:
+        s = saida[col]
+        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
+            saida[col] = s.where(pd.notna(s), None)
+        else:
+            saida[col] = s.map(_texto_celula)
+    return saida
+
+
 def escrever_aba(planilha, nome: str, df, limpar: bool = True):
     """Escreve um DataFrame. resize=True é o que impede o truncamento."""
     import pandas as pd  # noqa: F401
@@ -86,7 +127,7 @@ def escrever_aba(planilha, nome: str, df, limpar: bool = True):
                        rows=str(n_linhas), cols=str(n_colunas))
         print(f"  aba '{nome}' criada")
 
-    com_retry(set_with_dataframe, ws, df.fillna(""),
+    com_retry(set_with_dataframe, ws, _para_sheets(df),
               include_index=False, include_column_header=True,
               resize=True)   # <- não remova
     com_retry(ws.freeze, rows=1)
