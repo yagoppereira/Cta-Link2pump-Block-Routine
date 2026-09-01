@@ -183,6 +183,25 @@ def escrever_aba(planilha, nome: str, df, limpar: bool = True):
                        rows=str(n_linhas), cols=str(n_colunas))
         print(f"  aba '{nome}' criada")
 
+    # Limpa a FORMATAÇÃO, não só o conteúdo. worksheet.clear() apaga valores e
+    # deixa o formato da célula: se numa execução anterior aquela coluna tinha
+    # data, a coluna nova herda o formato e um número vira data. Foi o que
+    # aconteceu com `encargos`: R$ 120,38 foi escrito certo e apareceu como
+    # 1900-04-29, que é o serial 120 do Sheets. Mesma origem do `valor_x90` e
+    # do `so_baixa_contabil` saindo como 1899-12-30.
+    if limpar:
+        try:
+            com_retry(planilha.batch_update, {"requests": [{
+                "repeatCell": {
+                    "range": {"sheetId": ws.id},
+                    "cell": {"userEnteredFormat": {}},
+                    "fields": "userEnteredFormat",
+                }
+            }]})
+        except Exception as exc:
+            print(f"  (não consegui limpar a formatação de '{nome}': "
+                  f"{type(exc).__name__} — números podem aparecer como data)")
+
     # Descongela ANTES de escrever. Com resize=True e um DataFrame vazio, o
     # gspread tenta encolher a aba para 1 linha — a do cabeçalho, congelada
     # pela execução anterior — e o Google recusa: "Não é possível excluir todas
