@@ -132,6 +132,41 @@ def _para_sheets(df):
     return pd.DataFrame(colunas, columns=list(df.columns))
 
 
+def ler_aba_procurando_cabecalho(planilha, nome: str, obrigatorias: list,
+                                 max_linhas: int = 10) -> list:
+    """Como ler_aba, mas o cabeçalho não precisa estar na linha 1.
+
+    A aba ACORDOS tem 'TOTAL EM ACORDO: R$ ...' na primeira linha e o cabeçalho
+    real na segunda. Assumir linha 1 fazia a leitura devolver zero registros —
+    sem erro, o que é pior: o cruzamento simplesmente não acontecia e o disparo
+    seguiria notificando quem está pagando acordo.
+
+    obrigatorias: nomes de coluna que identificam o cabeçalho de verdade.
+    """
+    ws = com_retry(planilha.worksheet, nome)
+    valores = com_retry(ws.get_all_values)
+    alvo = {re.sub(r"\s+", "_", a.strip()).lower() for a in obrigatorias}
+
+    for i, linha in enumerate(valores[:max_linhas]):
+        cab = [re.sub(r"\s+", "_", str(c).strip()).lower() for c in linha]
+        if alvo.issubset(set(cab)):
+            saida = []
+            for row in valores[i + 1:]:
+                if not any(str(c).strip() for c in row):
+                    continue
+                row = list(row) + [""] * (len(cab) - len(row))
+                saida.append(dict(zip(cab, row)))
+            if i:
+                print(f"  ('{nome}': cabeçalho na linha {i + 1})")
+            return saida
+
+    raise RuntimeError(
+        f"Não achei o cabeçalho da aba '{nome}' nas primeiras {max_linhas} "
+        f"linhas. Esperava as colunas {sorted(alvo)}. "
+        f"Primeira linha lida: {valores[0][:8] if valores else '(aba vazia)'}"
+    )
+
+
 def escrever_aba(planilha, nome: str, df, limpar: bool = True):
     """Escreve um DataFrame. resize=True é o que impede o truncamento."""
     import pandas as pd  # noqa: F401
