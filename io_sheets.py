@@ -92,23 +92,44 @@ def _para_sheets(df):
     """Prepara o DataFrame para o Sheets sem quebrar tipos exóticos.
 
     `df.fillna("")` parece inofensivo e não é: colunas DATE vindas do BigQuery
-    chegam como `dbdate`, e enfiar string vazia nelas estoura com
-    "Bad date string: ''" quando o gspread lê os valores de volta.
+    chegam como `dbdate` (extension array), e enfiar string vazia nelas estoura
+    com `ValueError: Bad date string: ''`. O db_dtypes está certo em recusar —
+    string vazia não é data. O erro é nosso.
+
+    Monta um DataFrame NOVO em vez de reatribuir colunas: assim nenhum
+    extension array sobrevive à conversão e não há chance de o pandas tentar
+    recastar o valor de volta para o tipo original.
 
     Numérico e booleano passam intactos, para o Sheets receber número como
-    número. O resto vira texto via map — que não depende do dtype e por isso
+    número. O resto vira texto via map, que não depende do dtype e por isso
     funciona igual para dbdate, datetime, Decimal ou object.
     """
     import pandas as pd
 
-    saida = df.copy()
-    for col in saida.columns:
-        s = saida[col]
-        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
-            saida[col] = s.where(pd.notna(s), None)
+    from decimal import Decimal
+
+    def _e_numerica(serie):
+        """NUMERIC do BigQuery chega como Decimal dentro de coluna `object`, e
+        is_numeric_dtype devolve False. Se isso passar para o ramo de texto,
+        str(Decimal('48300.300000000')) vira "48300.300000000" e o Sheets em
+        pt-BR lê o ponto como separador de MILHAR: R$ 48.300,30 aparece como
+        48.300.300.000.000. Inflado em 10^9, sem erro nenhum."""
+        if pd.api.types.is_numeric_dtype(serie) or pd.api.types.is_bool_dtype(serie):
+            return True
+        naonulos = [v for v in serie.tolist() if v is not None and not (
+            isinstance(v, float) and pd.isna(v))]
+        return bool(naonulos) and all(isinstance(v, Decimal) for v in naonulos)
+
+    colunas = {}
+    for col in df.columns:
+        s = df[col]
+        if _e_numerica(s):
+            colunas[col] = [None if v is None or (isinstance(v, float) and pd.isna(v))
+                            or v is pd.NA else float(v)
+                            for v in s.astype(object).tolist()]
         else:
-            saida[col] = s.map(_texto_celula)
-    return saida
+            colunas[col] = [_texto_celula(v) for v in s.tolist()]
+    return pd.DataFrame(colunas, columns=list(df.columns))
 
 
 def escrever_aba(planilha, nome: str, df, limpar: bool = True):
