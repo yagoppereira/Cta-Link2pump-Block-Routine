@@ -92,8 +92,16 @@ def extrair_codigo(empresa) -> str | None:
 
 
 def _doc(valor) -> str | None:
-    """'20287761/1' -> '20287761/1'. Só normaliza espaço e caixa."""
-    d = re.sub(r"\s+", "", str(valor or "")).upper()
+    """'20287761/1' -> '20287761'.
+
+    A planilha grava fatura + parcela colados; a titulos_cigam guarda só a
+    fatura. Medido: 0 de 65 casam com o DOC inteiro, 65 de 65 cortando no '/'.
+
+    Consequência assumida: o grão vira FATURA, não parcela. Se só a parcela 1
+    de uma fatura estiver no acordo, as demais também ficam protegidas — erra
+    para o lado de não notificar, que é o lado barato.
+    """
+    d = re.sub(r"\s+", "", str(valor or "")).split("/")[0].upper()
     return d or None
 
 
