@@ -238,7 +238,9 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
         import acordos as ac
         reg = ac.carregar(gc, io)
         print(reg.resumo())
-        df, fora_acordo = ac.aplicar(df, reg)
+        docs = {r.codigo: str(r.faturas_vencidas or "").split(";")
+                for r in df.itertuples()}
+        df, fora_acordo = ac.aplicar(df, reg, docs_por_cliente=docs)
         if len(fora_acordo):
             elegivel = fora_acordo[(fora_acordo.frequencia >= freq_minima)
                                    & (fora_acordo.frequencia_propria >= freq_propria_minima)]
