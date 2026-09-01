@@ -16,6 +16,11 @@
 --    data_inicio_inadimplencia, que embute carência de dias úteis. São dois
 --    relógios diferentes e misturá-los conta a carência duas vezes.
 --
+--  * SÓ VENCIDO. O aviso de bloqueio cobra o que está em atraso. Sem este
+--    filtro entram as parcelas futuras do contrato — 154 títulos vencendo até
+--    2027 no caso da Luiz Costa — e o quadro do e-mail deixa de descrever
+--    inadimplência.
+--
 --  * A âncora é data_envio (decisão do usuário), não data_limite. O valor do
 --    e-mail é a POSIÇÃO na data de envio, e serve de ponto de partida da
 --    negociação — não é um valor de quitação. Consequência a aceitar: se o
@@ -51,7 +56,6 @@ SELECT
   t.dataVencimento,
   t.saldo,                                              -- base do cálculo
   GREATEST(0, DATE_DIFF(@data_envio, t.dataVencimento, DAY)) AS dias_atraso,
-  t.dataVencimento < @data_envio    AS vencido,
   t.codigoContrato,
   t.situacao,
   t.codigoPortador,
@@ -59,7 +63,11 @@ SELECT
 FROM `hip-bonito-453017-m2.silver.titulos_cigam` t
 WHERE t.codigoEmpresa IN UNNEST(@lista_clientes)
   AND t.saldo > 0
-  -- X90 é baixa contábil (write-off interno). Cobrar por cima de perda
-  -- estimada é decisão de crédito, não de pipeline — fica de fora por padrão.
-  AND COALESCE(t.codigoPortador, '') != 'X90'
+  AND t.dataVencimento < @data_envio
+  -- X90 ENTRA. Baixa em X90 é contábil, não pagamento: o título segue devido,
+  -- e a régua seleciona o cliente contando com ele. Excluir aqui criava duas
+  -- definições de dívida no mesmo pipeline — a Construtora Luiz Costa foi
+  -- selecionada por R$ 6.758 de X90 vencido, e o e-mail dela mostraria
+  -- R$ 248.515 de parcelas futuras sem citar um centavo da dívida real.
+  -- X91/X92 não chegam aqui: a régua já exclui esses clientes inteiros.
 ORDER BY t.codigoEmpresa, t.dataVencimento, t.codigoLancamento
