@@ -168,8 +168,8 @@ def ingerir_lista(gc, lista_recebida: list):
     return ing
 
 
-def candidatos(gc, bq, freq_minima: int = 7, dias_uso: int = 90,
-               escrever: bool = True) -> list:
+def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
+               dias_uso: int = 90, escrever: bool = True) -> list:
     """Aplica a REGRA DE BLOQUEIO e escreve a Campanha_Input.
 
         deve a X frequência  E  tem uso recente  ->  entra na régua
@@ -184,9 +184,11 @@ def candidatos(gc, bq, freq_minima: int = 7, dias_uso: int = 90,
     fora em silêncio; assim, a distração faz entrar alguém que você teria
     tirado — e o teste redirecionado pega isso antes de sair.
 
-    freq_minima: meses distintos com título vencido, medidos no GRUPO (raiz de
-                 CNPJ) e incluindo X90. Conferido contra os números do Paul em
-                 6 de 6 clientes.
+    freq_minima: meses distintos com título vencido no GRUPO (raiz de CNPJ),
+                 incluindo X90 e contando SÓ cadastros com bomba. Conferido
+                 contra os números do Paul em 6 de 6 clientes.
+    freq_propria_minima: o grupo dá o sinal, mas o cadastro precisa merecer.
+                 Sem isto, quem deve um mês entra porque um irmão deve nove.
     dias_uso:    janela do último abastecimento. Cliente sem alocação sai com
                  uso desconhecido e NÃO entra automaticamente.
     """
@@ -227,11 +229,19 @@ def candidatos(gc, bq, freq_minima: int = 7, dias_uso: int = 90,
                 chave = r.codigo if r.codigo in motivo_de else r.cnpj_raiz
                 print(f"   {r.codigo} {str(r.cliente)[:32]:<32} {motivo_de.get(chave,'')}")
 
-    dentro = df[(df.frequencia >= freq_minima) & (df.usa_equipamento == True)]
-    sem_uso = df[(df.frequencia >= freq_minima) & (df.usa_equipamento.isna())]
+    qualificado = ((df.frequencia >= freq_minima)
+                   & (df.frequencia_propria >= freq_propria_minima))
+    dentro = df[qualificado & (df.usa_equipamento == True)]
+    sem_uso = df[qualificado & (df.usa_equipamento.isna())]
+    so_pelo_grupo = df[(df.frequencia >= freq_minima)
+                       & (df.frequencia_propria < freq_propria_minima)]
 
-    print(f"{len(df)} cliente(s) com dívida | freq >= {freq_minima}: "
-          f"{(df.frequencia >= freq_minima).sum()}")
+    print(f"{len(df)} cliente(s) com dívida | grupo >= {freq_minima}: "
+          f"{(df.frequencia >= freq_minima).sum()} | e própria >= "
+          f"{freq_propria_minima}: {qualificado.sum()}")
+    if len(so_pelo_grupo):
+        print(f"  {len(so_pelo_grupo)} fora por frequência própria baixa "
+              f"(entrariam só pelo grupo)")
     print(f"  entram na régua (uso em {dias_uso}d): {len(dentro)} · "
           f"R$ {dentro.em_atraso.sum():,.2f}")
     if len(sem_uso):
