@@ -130,9 +130,13 @@ def _cadastros(bq, docs: set) -> pd.DataFrame:
       WHERE divisao.codigoDivisao IN ('10','11','12','90') AND codigo != '000679'
     ),
     t AS (
+      -- X90 CONTA. Baixa contábil não é pagamento, e a régua seleciona o
+      -- cliente contando com ela: excluir aqui rejeitava como "sem título"
+      -- justamente quem a régua tinha acabado de escolher (Aço Verde 002554,
+      -- Apia 000268, Agae 003057 — todos com dívida 100% X90).
       SELECT codigoEmpresa, COUNT(*) AS n_titulos
       FROM `{PROJECT_ID}.silver.titulos_cigam`
-      WHERE saldo > 0 AND COALESCE(codigoPortador,'') != 'X90'
+      WHERE saldo > 0
       GROUP BY 1
     ),
     b AS (
@@ -431,8 +435,13 @@ def preparar(c, gc, bq) -> dict:
 # ------------------------------------------------------------------- fase B
 
 
-def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
-    """Lê o congelado e envia. NUNCA consulta o BigQuery."""
+def montar_fila(c, gc) -> list:
+    """Constrói as mensagens a partir do CONGELADO, sem enviar nada.
+
+    Extraída do disparar() para a prévia usar exatamente o mesmo caminho: se a
+    prévia montasse o e-mail por conta própria, você estaria conferindo uma
+    coisa e disparando outra.
+    """
     p1 = io.abrir(gc, ID_DESTINO)
 
     previa = [l for l in io.ler_aba(p1, ABA_PREVIA) if l["id_campanha"] == c.id_campanha]
@@ -467,6 +476,38 @@ def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
             cc=list(dict.fromkeys(cc)),
             assunto=corpo["assunto"], html=html, texto=corpo["texto"],
         ))
+
+    return fila
+
+
+def previa_email(c, gc, codigo: str = None, quantos: int = 1):
+    """Mostra o e-mail renderizado no notebook. NÃO envia, não toca no log,
+    não precisa de SMTP."""
+    from IPython.display import HTML, display
+
+    fila = montar_fila(c, gc)
+    if codigo:
+        alvo = str(codigo).zfill(6)
+        fila = [j for j in fila if j.codigo_cliente == alvo]
+        if not fila:
+            print(f"{alvo} não está na fila. Códigos: "
+                  f"{', '.join(j.codigo_cliente for j in montar_fila(c, gc))[:200]}")
+            return []
+
+    for job in fila[:quantos]:
+        print("=" * 78)
+        print(f"PARA:     {'; '.join(job.para)}")
+        print(f"CC:       {'; '.join(job.cc)}")
+        print(f"ASSUNTO:  {job.assunto}")
+        print("=" * 78)
+        display(HTML(job.html))
+    return fila[:quantos]
+
+
+def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
+    """Lê o congelado e envia. NUNCA consulta o BigQuery."""
+    p1 = io.abrir(gc, ID_DESTINO)
+    fila = montar_fila(c, gc)
 
     r = envio.disparar(
         fila, c,
