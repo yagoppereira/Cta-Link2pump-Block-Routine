@@ -45,7 +45,11 @@ import vendedores as vend
 PROJECT_ID = "hip-bonito-453017-m2"
 
 ID_DESTINO = "1KkE6_D_-xug1LSxQYJ9v5vjUtjK72uzawL0pBfC4h3A"      # planilha 1 (nossa)
-ID_VENDEDORES = "1KSd7cdHUiotmE6WAePq0WnXzhLZz8vggwPkcn1ZGBv4"   # planilha 2 (leitura)
+# Planilha 2 ("Central Inadimplência por Carteira de Vendedor") saiu do
+# circuito: o cruzamento cliente<->vendedor dela já chega pronto na coluna
+# `vendedor` da Contatos_Emails. Mantido só como referência de onde o dado
+# nasce; o pipeline não abre mais essa planilha.
+ID_VENDEDORES = "1KSd7cdHUiotmE6WAePq0WnXzhLZz8vggwPkcn1ZGBv4"   # não usado
 
 ABA_INPUT = "Campanha_Input"
 ABA_PREVIA = "Campanha_Previa"
@@ -53,8 +57,9 @@ ABA_TITULOS = "Campanha_Titulos"
 ABA_BOMBAS = "Campanha_Bombas"
 ABA_LOG = "Campanha_Log"
 ABA_TRIAGEM = "Triagem"
+ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
 ABA_EMAIL_VEND = "Email_Vendedores"
-ABA_BASE_CLIENTES = "Base_Clientes"     # planilha 2
+ABA_CONTATOS = "Contatos_Emails"        # traz a coluna `vendedor` já resolvida
 
 SQL = Path(__file__).parent
 
@@ -101,14 +106,20 @@ def _cadastros(bq, docs: set) -> pd.DataFrame:
         REGEXP_REPLACE(COALESCE(cnpjCpf,''), r'\\D','') AS doc,
         (SELECT COUNT(DISTINCT LOWER(TRIM(JSON_EXTRACT_SCALAR(x,'$.email'))))
          FROM UNNEST(JSON_EXTRACT_ARRAY(COALESCE(NULLIF(contatos_json,''),'[]'))) x
-         WHERE JSON_EXTRACT_SCALAR(x,'$.recebeEmailCartaCobranca') = 'S'
+         WHERE 'S' IN (JSON_EXTRACT_SCALAR(x,'$.recebeEmailCartaCobranca'),
+                       JSON_EXTRACT_SCALAR(x,'$.recebeEmailCobranca'),
+                       JSON_EXTRACT_SCALAR(x,'$.recebeEmailNfe'),
+                       JSON_EXTRACT_SCALAR(x,'$.recebeEmailBoleto'))
            AND REGEXP_CONTAINS(
                  LOWER(TRIM(COALESCE(JSON_EXTRACT_SCALAR(x,'$.email'),''))),
                  r'^[^@\\s,;]+@[^@\\s,;]+\\.[a-z]{{2,}}$')) AS n_destinatarios,
         ARRAY(
           SELECT DISTINCT LOWER(TRIM(JSON_EXTRACT_SCALAR(x,'$.email')))
           FROM UNNEST(JSON_EXTRACT_ARRAY(COALESCE(NULLIF(contatos_json,''),'[]'))) x
-          WHERE JSON_EXTRACT_SCALAR(x,'$.recebeEmailCartaCobranca') = 'S'
+          WHERE 'S' IN (JSON_EXTRACT_SCALAR(x,'$.recebeEmailCartaCobranca'),
+                        JSON_EXTRACT_SCALAR(x,'$.recebeEmailCobranca'),
+                        JSON_EXTRACT_SCALAR(x,'$.recebeEmailNfe'),
+                        JSON_EXTRACT_SCALAR(x,'$.recebeEmailBoleto'))
             AND REGEXP_CONTAINS(
                   LOWER(TRIM(COALESCE(JSON_EXTRACT_SCALAR(x,'$.email'),''))),
                   r'^[^@\\s,;]+@[^@\\s,;]+\\.[a-z]{{2,}}$')
@@ -140,15 +151,109 @@ def _cadastros(bq, docs: set) -> pd.DataFrame:
 # ------------------------------------------------------------------- fase A
 
 
+def ingerir_lista(gc, lista_recebida: list):
+    """Recebe a lista no formato da planilha de Frequência de Vencimento,
+    classifica e escreve a Campanha_Input colorida. Não consulta o BigQuery.
+
+    Passo separado do preparar() de propósito: entre um e outro alguém lê os
+    CONFERIR. Na lista real, 79 de 194 caíram nessa faixa.
+    """
+    import entrada as ent
+    p1 = io.abrir(gc, ID_DESTINO)
+    ing = ent.ingerir(lista_recebida)
+    print(ing.resumo())
+    ent.escrever_campanha_input(p1, ing, io, ABA_INPUT)
+    return ing
+
+
+def candidatos(gc, bq, freq_minima: int = 7, dias_uso: int = 90,
+               escrever: bool = True) -> list:
+    """Aplica a REGRA DE BLOQUEIO e escreve a Campanha_Input.
+
+        deve a X frequência  E  tem uso recente  ->  entra na régua
+
+    O script propõe, você veta. A alternativa — você monta a lista e o script
+    obedece — coloca em você o trabalho que o warehouse faz melhor (frequência,
+    saldo, último uso, bombas, destinatários) e deixa de fora só o que ele não
+    sabe: renegociação em curso, jurídico, conta que o comercial pediu para
+    segurar. É esse resto que vai na coluna `acao`.
+
+    EM BRANCO ENTRA. Se fosse o contrário, uma distração deixaria cliente de
+    fora em silêncio; assim, a distração faz entrar alguém que você teria
+    tirado — e o teste redirecionado pega isso antes de sair.
+
+    freq_minima: meses distintos com título vencido, medidos no GRUPO (raiz de
+                 CNPJ) e incluindo X90. Conferido contra os números do Paul em
+                 6 de 6 clientes.
+    dias_uso:    janela do último abastecimento. Cliente sem alocação sai com
+                 uso desconhecido e NÃO entra automaticamente.
+    """
+    sql = (SQL / "base_inadimplencia.sql").read_text()
+    sql = sql.replace("DECLARE dias_uso_recente INT64 DEFAULT 90;",
+                      f"DECLARE dias_uso_recente INT64 DEFAULT {int(dias_uso)};")
+    df = bq.query(sql).to_dataframe(create_bqstorage_client=False)
+
+    dentro = df[(df.frequencia >= freq_minima) & (df.usa_equipamento == True)]
+    sem_uso = df[(df.frequencia >= freq_minima) & (df.usa_equipamento.isna())]
+
+    print(f"{len(df)} cliente(s) com dívida | freq >= {freq_minima}: "
+          f"{(df.frequencia >= freq_minima).sum()}")
+    print(f"  entram na régua (uso em {dias_uso}d): {len(dentro)} · "
+          f"R$ {dentro.em_atraso.sum():,.2f}")
+    if len(sem_uso):
+        print(f"  {len(sem_uso)} com frequência mas SEM ALOCAÇÃO — uso "
+              f"desconhecido, ficam fora e vão para Triagem "
+              f"(R$ {sem_uso.em_atraso.sum():,.2f})")
+
+    if escrever and len(dentro):
+        import pandas as pd
+        p1 = io.abrir(gc, ID_DESTINO)
+        saida = dentro.copy()
+        saida.insert(0, "acao", "")          # em branco = entra
+        io.escrever_aba(p1, ABA_INPUT, saida)
+        io.escrever_aba(p1, ABA_TRIAGEM_REGRA, sem_uso)
+        print(f"\n'{ABA_INPUT}': {len(saida)} candidato(s). Preencha `acao` "
+              f"só para EXCLUIR alguém, com o motivo.")
+
+    return dentro.to_dict("records")
+
+
 def preparar(c, gc, bq) -> dict:
     """Lê a lista, resolve, calcula e CONGELA. Não envia nada."""
     p1 = io.abrir(gc, ID_DESTINO)
-    p2 = io.abrir(gc, ID_VENDEDORES)
 
-    entrada = [l.get("cliente") or l.get("cnpj") or l.get("codigo")
-               for l in io.ler_aba(p1, ABA_INPUT)]
+    todas = io.ler_aba(p1, ABA_INPUT)
+    if not todas:
+        raise RuntimeError(f"'{ABA_INPUT}' vazia. Rode candidatos() para a régua "
+                           f"calcular, ou ingerir_lista() para uma lista recebida.")
+
+    # Duas origens possíveis para a aba, e cada uma marca de um jeito:
+    #   candidatos()    -> coluna `acao`, EM BRANCO entra
+    #   ingerir_lista() -> coluna `status`, só PRONTO entra
+    # Sem nenhuma das duas, a aba foi montada à mão e tudo entra.
+    cols = set(todas[0])
+    if "acao" in cols:
+        elegiveis = [l for l in todas if not str(l.get("acao", "")).strip()]
+        vetados = [l for l in todas if str(l.get("acao", "")).strip()]
+        print(f"{len(todas)} candidato(s); {len(elegiveis)} entram, "
+              f"{len(vetados)} vetado(s) por você.")
+        for l in vetados[:10]:
+            print(f"   {l.get('codigo')}: {l.get('acao')}")
+    elif "status" in cols:
+        elegiveis = [l for l in todas if str(l.get("status", "")).strip().upper() == "PRONTO"]
+        barradas = len(todas) - len(elegiveis)
+        print(f"{len(todas)} linha(s) em {ABA_INPUT}; {len(elegiveis)} PRONTO, "
+              f"{barradas} retida(s) (renegociado, acordo, jurídico, sem equipamento).")
+        if barradas and not elegiveis:
+            raise RuntimeError("Nenhuma linha PRONTO. Revise a Campanha_Input: "
+                               "renegociado e acordo não recebem aviso de bloqueio.")
+    else:
+        elegiveis = todas
+        print(f"{len(todas)} linha(s) em {ABA_INPUT} (sem coluna 'status': "
+              f"nenhum filtro de renegociado/acordo aplicado).")
+
+    entrada = [l.get("codigo") or l.get("cliente") or l.get("cnpj") for l in elegiveis]
     entrada = [e for e in entrada if str(e or "").strip()]
-    print(f"{len(entrada)} linha(s) em {ABA_INPUT}.")
 
     docs = set()
     for bruto in entrada:
@@ -182,11 +287,13 @@ def preparar(c, gc, bq) -> dict:
     df_tit.insert(0, "id_campanha", c.id_campanha)
     df_bmb.insert(0, "id_campanha", c.id_campanha)
 
-    # --- vendedores (planilha 2, somente leitura)
+    # --- vendedores: tudo na planilha 1. A Contatos_Emails já traz o
+    # cruzamento cliente<->vendedor pronto; join por codigo_cliente, nunca por
+    # cnpj_cpf (essa coluna virou número e perdeu zeros à esquerda).
     resv = vend.resolver_vendedores(
-        base_clientes=io.ler_aba(p2, ABA_BASE_CLIENTES),
+        contatos_emails=io.ler_aba(p1, ABA_CONTATOS),
         email_vendedores=io.ler_aba(p1, ABA_EMAIL_VEND),
-        cnpj_por_codigo={cod: cadastros[cod] for cod in codigos},
+        codigos=codigos,
     )
     print(resv.resumo())
 
@@ -216,10 +323,6 @@ def preparar(c, gc, bq) -> dict:
                             "nome_cliente": r.nome_cliente, "caso": "sem bomba alocada",
                             "detalhe": "pode ser bloqueio anterior, sem hardware, ou "
                                        "alocação não validada no app — não automatizar"})
-        if cod in resv.para_confirmar:
-            triagem.append({"id_campanha": c.id_campanha, "codigo_cliente": cod,
-                            "nome_cliente": r.nome_cliente, "caso": "vendedor inferido",
-                            "detalhe": resv.para_confirmar[cod]["regra"]})
     for cod, motivo in resv.bloqueados.items():
         triagem.append({"id_campanha": c.id_campanha, "codigo_cliente": cod,
                         "nome_cliente": por_codigo[cod].nome_cliente,
