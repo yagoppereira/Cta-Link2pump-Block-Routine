@@ -139,6 +139,19 @@ def rodar(codigos_teste=("000337", "003106", "002786")) -> bool:
             if not faltando:
                 print("\n" + V.conferir_catalogo(contatos, vend))
 
+    _passo("5b. planilha de ACORDOS (outro processo, somente leitura)")
+    try:
+        import acordos as AC
+        reg = AC.carregar(gc, io)
+        _ok_(f"acesso ok — {len(reg.por_cliente)} cliente(s) com acordo, "
+             f"{len(reg.titulos_protegidos)} título(s) protegido(s)")
+        if reg.indefinidos:
+            _ok_(f"   {len(reg.indefinidos)} em estado INDEFINIDO (seguram o disparo)")
+    except Exception as ex:
+        _falha(f"ACORDOS: {type(ex).__name__}: {str(ex)[:140]}\n"
+               f"        Sem isto o disparo notifica quem está pagando acordo. "
+               f"Compartilhe a planilha com a conta que você usa no Colab.")
+
     _passo("6. queries (dry_run: valida sem custo e sem ler linha)")
     from google.cloud import bigquery
     for arquivo, params in (
