@@ -95,23 +95,31 @@ def rodar(codigos_teste=("000337", "003106", "002786")) -> bool:
 
     if p1:
         entrada = io.ler_aba(p1, "Campanha_Input", obrigatoria=False)
-        (_ok_ if entrada else _falha)(
-            f"Campanha_Input: {len(entrada)} linha(s)"
-            + ("" if entrada else " — vazia, preencha antes de preparar()"))
-        if entrada:
+        if not entrada:
+            # Vazia é o estado NORMAL antes da régua rodar: quem preenche esta
+            # aba é main.candidatos(). Não é falha, é o próximo passo.
+            print("   —     Campanha_Input vazia. Rode main.candidatos() para a "
+                  "régua calcular quem entra.")
+        else:
+            _ok_(f"Campanha_Input: {len(entrada)} linha(s)")
             cols = set(entrada[0])
-            if cols & {"cliente", "cnpj", "codigo"}:
-                _ok_(f"   colunas reconhecidas: {', '.join(sorted(cols))}")
-            else:
-                _falha(f"   nenhuma coluna 'cliente'/'cnpj'/'codigo'. Tem: "
+            if not (cols & {"cliente", "cnpj", "codigo"}):
+                _falha(f"   nenhuma coluna 'codigo'/'cliente'/'cnpj'. Tem: "
                        f"{', '.join(sorted(cols))}")
-            if "status" in cols:
-                from collections import Counter
+
+            # Duas origens, duas convenções:
+            #   candidatos()    -> coluna `acao`,   EM BRANCO entra
+            #   ingerir_lista() -> coluna `status`, só PRONTO entra
+            from collections import Counter
+            if "acao" in cols:
+                vetados = sum(1 for l in entrada if str(l.get("acao","")).strip())
+                _ok_(f"   régua: {len(entrada) - vetados} entram, {vetados} vetado(s)")
+            elif "status" in cols:
                 cont = Counter(str(l.get("status","")).strip().upper() for l in entrada)
                 _ok_("   status: " + ", ".join(f"{v} {k}" for k, v in cont.most_common()))
             else:
-                _falha("   sem coluna 'status': renegociado e acordo NÃO seriam "
-                       "barrados. Use main.ingerir_lista() para montar a aba.")
+                _falha("   sem coluna 'acao' nem 'status': a aba foi montada à mão "
+                       "e TODAS as linhas entrariam, sem filtro de veto.")
 
         vend = io.ler_aba(p1, "Email_Vendedores", obrigatoria=False)
         import vendedores as V
