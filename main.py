@@ -231,8 +231,32 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
 
     qualificado = ((df.frequencia >= freq_minima)
                    & (df.frequencia_propria >= freq_propria_minima))
-    dentro = df[qualificado & (df.usa_equipamento == True)]
-    sem_uso = df[qualificado & (df.usa_equipamento.isna())]
+    # Acordos: quem está pagando sai; quem QUEBROU fica e é marcado.
+    # Sem este cruzamento, o disparo manda aviso de bloqueio para cliente que
+    # está honrando um acordo — o pior erro possível numa régua de cobrança.
+    try:
+        import acordos as ac
+        reg = ac.carregar(gc, io)
+        print(reg.resumo())
+        df, fora_acordo = ac.aplicar(df, reg)
+        if len(fora_acordo):
+            elegivel = fora_acordo[(fora_acordo.frequencia >= freq_minima)
+                                   & (fora_acordo.frequencia_propria >= freq_propria_minima)]
+            print(f"  {len(elegivel)} candidato(s) fora por acordo vigente "
+                  f"(R$ {elegivel.em_atraso.astype(float).sum():,.2f}):")
+            for r in elegivel.itertuples():
+                print(f"     {r.codigo} {str(r.cliente)[:30]:<30} {r.status_acordo}")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Não consegui ler a aba ACORDOS ({type(exc).__name__}: {exc}).\n"
+            f"Isto NÃO é opcional: sem o cruzamento, o disparo notifica cliente "
+            f"que está pagando acordo. Corrija o acesso antes de seguir."
+        ) from exc
+
+    dentro = df[qualificado.reindex(df.index, fill_value=False)
+                & (df.usa_equipamento == True)]
+    sem_uso = df[qualificado.reindex(df.index, fill_value=False)
+                 & (df.usa_equipamento.isna())]
     so_pelo_grupo = df[(df.frequencia >= freq_minima)
                        & (df.frequencia_propria < freq_propria_minima)]
 
@@ -248,6 +272,13 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
         print(f"  {len(sem_uso)} com frequência mas SEM ALOCAÇÃO — uso "
               f"desconhecido, ficam fora e vão para Triagem "
               f"(R$ {sem_uso.em_atraso.sum():,.2f})")
+
+    quebrados = dentro[dentro.get("status_acordo", "") == "QUEBRADO"] \
+                if "status_acordo" in dentro else dentro.iloc[0:0]
+    if len(quebrados):
+        print(f"  {len(quebrados)} com ACORDO QUEBRADO — já tiveram uma chance:")
+        for r in quebrados.itertuples():
+            print(f"     {r.codigo} {str(r.cliente)[:30]}")
 
     if escrever and len(dentro):
         import pandas as pd
