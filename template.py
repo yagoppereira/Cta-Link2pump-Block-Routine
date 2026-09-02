@@ -43,8 +43,21 @@ SITE = "www.ctasmart.com.br"
 # no Google com URL autenticada. Ela aparece para você e vira quadrado vazio
 # para o cliente. Se a sua tiver logo, hospede a imagem numa URL pública.
 #
-# Vazio = usa a assinatura montada abaixo.
+# Vazio = usa a assinatura montada abaixo, com o logo embutido.
 ASSINATURA_HTML = ""
+
+# Logo da assinatura, EMBUTIDO na mensagem (não hospedado).
+#
+# Hospedar não resolve: URL `raw` de repositório privado do GitHub pede
+# autenticação e o cliente vê quadrado vazio. Link do Drive também falha na
+# maioria dos clientes. E a URL que o Gmail usa na assinatura dele é
+# autenticada — aparece para você e não para quem recebe.
+#
+# A saída é anexar a imagem como parte inline e referenciá-la por cid:. Como
+# somos nós que montamos o MIME, isso funciona em qualquer cliente e não
+# depende de nada externo. Aponte LOGO_PATH para o arquivo no repositório.
+LOGO_CID = "logo_ctasmart"
+LOGO_PATH = "logo_ctasmart.png"     # relativo à raiz do repositório
 
 CORPO_HTML = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1a2e;line-height:1.6;max-width:860px">
 <p>Prezado Cliente,</p>
@@ -63,11 +76,16 @@ poderá ser temporariamente suspenso até que resolvam as pendências.</p>
 {assinatura}
 </div>"""
 
-ASSINATURA_PADRAO = """<p style="margin-top:18px;border-top:1px solid #d3d1c7;padding-top:12px">
-<strong>{remetente_nome}</strong><br>
-{remetente_cargo}<br>
-<a href="https://{site}" style="color:#382fd8">{site}</a>
-</p>"""
+ASSINATURA_PADRAO = """<table cellpadding="0" cellspacing="0" role="presentation"
+ style="border-collapse:collapse;margin-top:20px;border-top:1px solid #d3d1c7">
+<tr>
+<td style="padding:14px 18px 0 0;vertical-align:middle">{logo}</td>
+<td style="padding:14px 0 0;vertical-align:middle;font-family:Arial,Helvetica,sans-serif">
+<div style="font-size:15px;font-weight:bold;color:#1a1a2e">{remetente_nome}</div>
+<div style="font-size:13px;color:#5c5c6b">{remetente_cargo}</div>
+<div style="font-size:13px"><a href="https://{site}" style="color:#382fd8">{site}</a></div>
+</td>
+</tr></table>"""
 
 
 def quadro_destaque(titulos: list, campanha) -> str:
@@ -296,8 +314,12 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
     # Agrupado por contrato. Sem isso, oito parcelas de R$ 720 no mesmo
     # vencimento parecem duplicata — e são oito contratos distintos. O subtotal
     # por contrato é o que o cliente confere contra o controle dele.
-    tg = ('padding:6px 10px;border:1px solid #d3d1c7;background:#f0efe9;'
-          'font-weight:bold;font-size:12px;color:#1a1a2e')
+    # Separação de contrato DISCRETA. O número do contrato interessa mais à CTA
+    # do que ao cliente: a versão anterior usava barra cinza, negrito e
+    # subtotal no mesmo peso das linhas de valor, e o quadro ficava bagunçado.
+    # Agora é um filete com texto pequeno e apagado — separa sem competir.
+    tg = ('padding:10px 10px 3px;border:none;border-top:1px solid #e6e4dc;'
+          'font-size:11px;color:#8b8b8b;letter-spacing:.3px')
 
     grupos: dict = {}
     for t in titulos:
@@ -315,7 +337,8 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
             linhas.append(
                 f'<tr><td style="{tg}" colspan="{len(colunas) - 1}">'
                 f'{rotulo} · {len(ts)} título(s)</td>'
-                f'<td style="{tg};text-align:right">{brl(sub)}</td></tr>')
+                f'<td style="{tg};text-align:right;white-space:nowrap">'
+                f'{brl(sub)}</td></tr>')
         for t in sorted(ts, key=lambda x: str(x.get("dataVencimento"))):
             fundo = "#ffffff" if i % 2 == 0 else "#f7f7f4"
             i += 1
@@ -339,7 +362,10 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
     soma_enc = sum(float(t.get("encargos") or 0) for t in titulos)
     soma_tot = sum(float(t.get("total") or 0) for t in titulos)
 
-    tf = ('padding:11px 10px;border:1px solid #1a1a2e;background:#19e098;'
+    # Total do rodapé SÓBRIO. A faixa verde sólida competia com o destaque do
+    # topo, que já mostra o valor em 30px — dois pontos focais na mesma peça.
+    # Aqui basta fechar a tabela: linha dupla em cima, fundo branco, negrito.
+    tf = ('padding:12px 10px 10px;border:none;border-top:2px solid #1a1a2e;'
           'font-weight:bold;font-size:14px;color:#1a1a2e;white-space:nowrap')
     rodape = (
         f'<tr>'
@@ -387,8 +413,11 @@ def montar_email(cliente, titulos: list, campanha) -> dict:
         cnpj=" / ".join(cnpjs) if len(cnpjs) <= 2 else f"{len(cnpjs)} CNPJs",
     )
 
+    logo = (f'<img src="cid:{LOGO_CID}" alt="Cta Smart" '
+            f'width="150" style="display:block;border:0">' if LOGO_PATH else "")
     assinatura = ASSINATURA_HTML.strip() or ASSINATURA_PADRAO.format(
-        remetente_nome=REMETENTE_NOME, remetente_cargo=REMETENTE_CARGO, site=SITE)
+        logo=logo, remetente_nome=REMETENTE_NOME,
+        remetente_cargo=REMETENTE_CARGO, site=SITE)
 
     html = CORPO_HTML.format(
         assinatura=assinatura,
