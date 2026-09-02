@@ -180,9 +180,11 @@ COLUNA_CNPJ = ("cnpj_cpf", "CNPJ", "left")
 # O `doc` também é mais curto que no relatório do CIGAM: lá aparece
 # "20261095/" ou "200099586/1", com a parcela colada. Esse sufixo também não
 # está no DW.
+COLUNA_NFSE = ("nfse", "NFS-e", "left")
+
 COLUNAS = [
     ("doc", "Documento", "left"),
-    ("codigoContrato", "Contrato", "left"),
+    ("tipo_pendencia", "Tipo", "left"),
     ("dataVencimento", "Vencimento", "center"),
     ("dias_atraso", "Atraso", "center"),
     ("saldo", "Saldo", "right"),
@@ -203,7 +205,17 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
     cliente precisa saber qual CNPJ deve o quê — a cobrança é centralizada,
     mas o débito continua sendo de cada inscrição.
     """
-    colunas = ([COLUNA_CNPJ] + COLUNAS) if mostrar_cnpj else COLUNAS
+    colunas = list(COLUNAS)
+    # NFS-e só entra quando ALGUM título tem o número. O campo NF_SERVICO do
+    # CIGAM não existe em nenhuma tabela do DW (procurei em
+    # lancamentos_enriquecidos e em cigam__notas_fiscais), então ele chega por
+    # ponte: a aba NFSe_Titulos, colada do export do CIGAM.
+    # Sem a ponte a coluna não aparece — em vez de repetir o documento, que foi
+    # o que aconteceu antes e passou por número de nota em 37 linhas.
+    if any(str(t.get("nfse") or "").strip() for t in titulos):
+        colunas.insert(1, COLUNA_NFSE)
+    if mostrar_cnpj:
+        colunas = [COLUNA_CNPJ] + colunas
     th = ('padding:8px 10px;background:#1a1a2e;color:#19e098;'
           'font-weight:bold;font-size:12px;border:1px solid #1a1a2e')
     td = 'padding:7px 10px;border:1px solid #d3d1c7;font-size:13px'
