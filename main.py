@@ -589,7 +589,13 @@ def _num(linha: dict) -> dict:
     """Sheets devolve tudo string. Converte o que o template precisa como número."""
     d = dict(linha)
     for k in ("saldo", "encargos", "total"):
-        bruto = str(d.get(k) or 0).strip().replace(".", "").replace(",", ".")
+        # Dois formatos convivem: pt-BR do Sheets ("1.152,00") e americano de
+        # quem calculou em Python ("64.80"). Remover o ponto cegamente estraga
+        # o segundo: 64.80 virava 6480. Decide pela vírgula — se ela existe, o
+        # ponto é separador de milhar; se não, o ponto é o decimal.
+        bruto = str(d.get(k) if d.get(k) not in (None, "") else 0).strip()
+        bruto = (bruto.replace(".", "").replace(",", ".")
+                 if "," in bruto else bruto)
         try:
             d[k] = float(bruto or 0)
         except ValueError:
@@ -601,8 +607,17 @@ def _num(linha: dict) -> dict:
                 f"que limpa a formatação antes de escrever."
             ) from None
     d["dias_atraso"] = int(float(d.get("dias_atraso") or 0))
-    if isinstance(d.get("datavencimento") or d.get("dataVencimento"), str):
-        v = d.get("datavencimento") or d.get("dataVencimento")
+    # ler_aba normaliza o cabeçalho para minúsculas, então `codigoContrato`
+    # chega como `codigocontrato` e o template não acha. Restaura os nomes que
+    # o template espera. Foi por isso que a coluna Contrato saiu "—" em 37 de
+    # 37 linhas: o dado estava lá, com outro nome.
+    for camel in ("codigoContrato", "dataVencimento", "codigoPortador",
+                  "codigoLancamento"):
+        if camel not in d and camel.lower() in d:
+            d[camel] = d[camel.lower()]
+
+    if isinstance(d.get("dataVencimento"), str):
+        v = d.get("dataVencimento")
         try:
             d["dataVencimento"] = date.fromisoformat(v[:10])
         except ValueError:
