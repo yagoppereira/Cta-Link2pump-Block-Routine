@@ -259,11 +259,26 @@ def append_log(planilha, nome: str, linha: dict):
               value_input_option="RAW")
 
 
-def chaves_ja_enviadas(planilha, nome_log: str, id_campanha: str) -> set:
-    """Códigos que já receberam e-mail NESTA campanha. É o que faz uma
-    reexecução continuar em vez de duplicar."""
+def chaves_ja_enviadas(planilha, nome_log: str, id_campanha: str,
+                       modo: str = "PRODUCAO") -> set:
+    """Códigos que já receberam e-mail NESTA campanha, NESTE modo.
+
+    O filtro por modo não é detalhe. Sem ele, um envio de teste marcava os
+    clientes como enviados e o disparo de PRODUÇÃO seguinte pulava todos —
+    você acharia que mandou e não teria mandado. O log é o mesmo, mas as duas
+    contagens são independentes.
+
+    Em modo TESTE devolve conjunto VAZIO de propósito: o teste existe para ser
+    repetido enquanto o template muda, e mandar duas vezes para a própria caixa
+    não tem custo. Idempotência protege o CLIENTE, não a sua caixa de entrada.
+    """
+    if modo == "TESTE":
+        return set()
+
     return {
         l.get("codigo_cliente")
         for l in ler_aba(planilha, nome_log, obrigatoria=False)
-        if l.get("id_campanha") == id_campanha and l.get("status") == "ENVIADO"
+        if l.get("id_campanha") == id_campanha
+        and l.get("status") == "ENVIADO"
+        and str(l.get("modo") or "PRODUCAO").upper() == modo
     }
