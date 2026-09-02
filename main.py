@@ -519,7 +519,8 @@ def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
         fila, c,
         enviar_fn=enviar_fn or (lambda job: None),
         log_fn=lambda linha: io.append_log(p1, ABA_LOG, linha),
-        chaves_ja_enviadas=io.chaves_ja_enviadas(p1, ABA_LOG, c.id_campanha),
+        chaves_ja_enviadas=io.chaves_ja_enviadas(p1, ABA_LOG, c.id_campanha,
+                                                 modo=c.modo),
     )
     print(r.resumo())
     return r
