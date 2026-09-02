@@ -452,6 +452,9 @@ def montar_fila(c, gc) -> list:
     if not previa:
         raise RuntimeError(f"Nada congelado para '{c.id_campanha}'. Rode preparar() antes.")
 
+    import nfse as nfse_ponte
+    mapa_nfse = nfse_ponte.carregar(p1, io)
+
     fila = []
     for cli in previa:
         cod = cli["codigo_cliente"]
@@ -460,6 +463,7 @@ def montar_fila(c, gc) -> list:
         if not tit:
             continue
 
+        tit = nfse_ponte.aplicar(tit, mapa_nfse)
         corpo = template.montar_email(cli, tit, c)
         html = corpo["html"]
         if bmb:
@@ -612,7 +616,7 @@ def _num(linha: dict) -> dict:
     # o template espera. Foi por isso que a coluna Contrato saiu "—" em 37 de
     # 37 linhas: o dado estava lá, com outro nome.
     for camel in ("codigoContrato", "dataVencimento", "codigoPortador",
-                  "codigoLancamento"):
+                  "codigoLancamento", "tipo_pendencia"):
         if camel not in d and camel.lower() in d:
             d[camel] = d[camel.lower()]
 
