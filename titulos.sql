@@ -57,10 +57,17 @@ SELECT
   t.saldo,                                              -- base do cálculo
   GREATEST(0, DATE_DIFF(@data_envio, t.dataVencimento, DAY)) AS dias_atraso,
   t.codigoContrato,
+  -- Tipo de pendência = descrição da conta financeira. Confere com a coluna
+  -- "Tipo Cobrança" do relatório do CIGAM: 100103 Licenciamentos,
+  -- 100104 Aluguel, 100105 Instalações, 100101 Venda de equipamentos e
+  -- perifericos, 100102 Adesões. Nada de ponte aqui — está tudo no DW.
+  COALESCE(NULLIF(TRIM(cc.DESCRICAO), ''), '—') AS tipo_pendencia,
   t.situacao,
   t.codigoPortador,
   @data_envio                      AS data_base_calculo
 FROM `hip-bonito-453017-m2.silver.titulos_cigam` t
+LEFT JOIN `hip-bonito-453017-m2.bronze.cigam__cadastro_conta_financeira` cc
+  ON cc.codigoConta = t.codigoConta
 WHERE t.codigoEmpresa IN UNNEST(@lista_clientes)
   AND t.saldo > 0
   AND t.dataVencimento < @data_envio
