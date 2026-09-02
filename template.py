@@ -28,6 +28,24 @@ REMETENTE_CARGO = "Analista de Cobrança"
 WHATSAPP = "(51) 99888-0734"
 SITE = "www.ctasmart.com.br"
 
+# ASSINATURA REAL, colada do Gmail.
+#
+# A assinatura do Gmail NÃO viaja por SMTP: ela é aplicada pelo cliente web na
+# hora de compor, não pelo servidor. Enviando por smtplib, ela simplesmente
+# não existe — por isso a versão fabricada abaixo.
+#
+# Para usar a sua de verdade: Gmail → Configurações → Ver todas as
+# configurações → Assinatura. Selecione o conteúdo, copie, e cole o HTML aqui.
+# (Para pegar o HTML: componha um e-mail com a assinatura, envie para você
+# mesmo, abra, três pontos → "Mostrar original" e copie o trecho da assinatura.)
+#
+# CUIDADO COM IMAGEM: assinatura do Gmail costuma referenciar imagem hospedada
+# no Google com URL autenticada. Ela aparece para você e vira quadrado vazio
+# para o cliente. Se a sua tiver logo, hospede a imagem numa URL pública.
+#
+# Vazio = usa a assinatura montada abaixo.
+ASSINATURA_HTML = ""
+
 CORPO_HTML = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1a2e;line-height:1.6;max-width:860px">
 <p>Prezado Cliente,</p>
 <p>Identificamos que sua empresa mantém o uso ativo de nossos serviços; no entanto,
@@ -42,12 +60,14 @@ ocorrer até o dia <strong>{data_limite}</strong>. Após este prazo, o acesso ao
 poderá ser temporariamente suspenso até que resolvam as pendências.</p>
 <p>Aguardamos seu retorno via WhatsApp {whatsapp} ou respondendo a este e-mail.</p>
 <p>Atenciosamente,</p>
-<p style="margin-top:18px;border-top:1px solid #d3d1c7;padding-top:12px">
+{assinatura}
+</div>"""
+
+ASSINATURA_PADRAO = """<p style="margin-top:18px;border-top:1px solid #d3d1c7;padding-top:12px">
 <strong>{remetente_nome}</strong><br>
 {remetente_cargo}<br>
 <a href="https://{site}" style="color:#382fd8">{site}</a>
-</p>
-</div>"""
+</p>"""
 
 
 def quadro_destaque(titulos: list, campanha) -> str:
@@ -367,7 +387,11 @@ def montar_email(cliente, titulos: list, campanha) -> dict:
         cnpj=" / ".join(cnpjs) if len(cnpjs) <= 2 else f"{len(cnpjs)} CNPJs",
     )
 
+    assinatura = ASSINATURA_HTML.strip() or ASSINATURA_PADRAO.format(
+        remetente_nome=REMETENTE_NOME, remetente_cargo=REMETENTE_CARGO, site=SITE)
+
     html = CORPO_HTML.format(
+        assinatura=assinatura,
         destaque=quadro_destaque(titulos, campanha),
         quadro=montar_quadro(titulos, campanha.data_envio, mostrar_cnpj=varios),
         data_limite=_dma(campanha.data_limite),
