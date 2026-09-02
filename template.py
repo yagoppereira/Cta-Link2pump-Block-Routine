@@ -84,6 +84,11 @@ def limpar_nome_bomba(bomba_nome: str, nome_cliente: str) -> str:
 
 
 def quadro_equipamentos(bombas: list, nome_cliente: str) -> str:
+    # COLUNAS CONDICIONAIS. Canal só distingue algo quando um equipamento
+    # atende mais de uma bomba (o mesmo serial aparece duas vezes). Observação
+    # só é preenchida quando a bomba está em operação de terceiro. Fora desses
+    # casos, as duas viram colunas de valor único ocupando espaço — foi o que
+    # aconteceu no Barbosa Mello, cinco bombas todas canal 1 e sem terceiro.
     """Quadro dos equipamentos vinculados ao contrato.
 
     Fala de VÍNCULO, não de localização física: alocacao_atualizada_em mede
@@ -98,21 +103,28 @@ def quadro_equipamentos(bombas: list, nome_cliente: str) -> str:
           'font-weight:bold;font-size:12px;border:1px solid #1a1a2e')
     td = 'padding:7px 10px;border:1px solid #d3d1c7;font-size:13px'
 
+    seriais_repetidos = {}
+    for b in bombas:
+        s = b.get("serial_equipamento")
+        seriais_repetidos[s] = seriais_repetidos.get(s, 0) + 1
+    mostrar_canal = any(n > 1 for n in seriais_repetidos.values())
+    mostrar_obs = any(b.get("instalada_em_terceiro") for b in bombas)
+
     linhas = []
     for i, b in enumerate(bombas):
         fundo = "#ffffff" if i % 2 == 0 else "#f7f7f4"
         nome = limpar_nome_bomba(b.get("bomba_nome"), nome_cliente)
-        obs = ""
-        if b.get("instalada_em_terceiro"):
-            obs = f'operação de {b.get("local_nome") or "terceiro"}'
-        linhas.append(
-            f'<tr style="background:{fundo}">'
-            f'<td style="{td}">{nome}</td>'
-            f'<td style="{td};text-align:center">{b.get("canal") or "—"}</td>'
-            f'<td style="{td};text-align:center">{b.get("serial_equipamento") or "—"}</td>'
-            f'<td style="{td};font-size:12px;color:#6b7280">{obs or "—"}</td>'
-            f'</tr>'
-        )
+        celulas = [f'<td style="{td}">{nome}</td>']
+        if mostrar_canal:
+            celulas.append(f'<td style="{td};text-align:center">'
+                           f'{b.get("canal") or "—"}</td>')
+        celulas.append(f'<td style="{td};text-align:center">'
+                       f'{b.get("serial_equipamento") or "—"}</td>')
+        if mostrar_obs:
+            obs = (f'operação de {b.get("local_nome") or "terceiro"}'
+                   if b.get("instalada_em_terceiro") else "—")
+            celulas.append(f'<td style="{td};font-size:12px;color:#6b7280">{obs}</td>')
+        linhas.append(f'<tr style="background:{fundo}">' + "".join(celulas) + "</tr>")
 
     n_eq = len({b.get("serial_equipamento") for b in bombas
                 if b.get("serial_equipamento") is not None})
@@ -129,9 +141,10 @@ def quadro_equipamentos(bombas: list, nome_cliente: str) -> str:
         '<table cellpadding="0" cellspacing="0" '
         'style="border-collapse:collapse;width:100%;margin-bottom:6px">'
         f'<thead><tr><th style="{th};text-align:left">Bomba</th>'
-        f'<th style="{th};text-align:center">Canal</th>'
-        f'<th style="{th};text-align:center">Série</th>'
-        f'<th style="{th};text-align:left">Observação</th></tr></thead>'
+        + (f'<th style="{th};text-align:center">Canal</th>' if mostrar_canal else "")
+        + f'<th style="{th};text-align:center">Série</th>'
+        + (f'<th style="{th};text-align:left">Observação</th>' if mostrar_obs else "")
+        + '</tr></thead>'
         f'<tbody>{"".join(linhas)}</tbody></table>'
         f'<p style="font-size:12px;color:#6b7280;margin:0 0 16px">{nota}</p>'
     )
