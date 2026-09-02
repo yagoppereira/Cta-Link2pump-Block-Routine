@@ -149,16 +149,38 @@ def _dma(d) -> str:
 
 COLUNA_CNPJ = ("cnpj_cpf", "CNPJ", "left")
 
+# COLUNAS QUE SAÍRAM, e por quê:
+#
+#   NFS-e  o número real da nota de serviço é o campo NF_SERVICO do relatório
+#          do CIGAM (ex.: 202400000016587) e ele NÃO é ingerido no warehouse —
+#          procurei em todos os campos do lançamento. O que a query devolve em
+#          `nf` é igual ao `fatura`, então a coluna repetia o documento em
+#          todas as linhas. Melhor não ter do que ter errado.
+#
+#   Tipo   `tipo_cobranca` só existe na gold.inadimplencia, que saiu do
+#          circuito. Vinha "—" em 100% das linhas.
+#
+# ENTROU `Contrato`: é o que dá sentido à repetição. No Barbosa Mello, oito
+# linhas de R$ 720 no mesmo vencimento parecem duplicata e são os oito
+# contratos dele.
+#
+# O `doc` também é mais curto que no relatório do CIGAM: lá aparece
+# "20261095/" ou "200099586/1", com a parcela colada. Esse sufixo também não
+# está no DW.
 COLUNAS = [
     ("doc", "Documento", "left"),
-    ("nfse", "NFS-e", "left"),
-    ("tipo_cobranca", "Tipo", "left"),
+    ("codigoContrato", "Contrato", "left"),
     ("dataVencimento", "Vencimento", "center"),
     ("dias_atraso", "Atraso", "center"),
     ("saldo", "Saldo", "right"),
     ("encargos", "Juros e multa", "right"),
     ("total", "Total", "right"),
 ]
+
+
+def _rotulo_contrato(v) -> str:
+    v = str(v or "").strip().lstrip("0")
+    return f"Contrato {v}" if v else "Sem contrato"
 
 
 def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
@@ -178,21 +200,47 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
     )
 
     linhas = []
-    for i, t in enumerate(titulos):
-        fundo = "#ffffff" if i % 2 == 0 else "#f7f7f4"
-        celulas = []
-        for campo, _, al in colunas:
-            v = t.get(campo)
-            if campo == "dataVencimento":
-                txt = _dma(v)
-            elif campo == "dias_atraso":
-                txt = "a vencer" if not v else f"{v} dias"
-            elif campo in ("saldo", "encargos", "total"):
-                txt = brl(v or 0)
-            else:
-                txt = "—" if v in (None, "") else str(v)
-            celulas.append(f'<td style="{td};text-align:{al}">{txt}</td>')
-        linhas.append(f'<tr style="background:{fundo}">' + "".join(celulas) + "</tr>")
+    # Agrupado por contrato. Sem isso, oito parcelas de R$ 720 no mesmo
+    # vencimento parecem duplicata — e são oito contratos distintos. O subtotal
+    # por contrato é o que o cliente confere contra o controle dele.
+    tg = ('padding:6px 10px;border:1px solid #d3d1c7;background:#f0efe9;'
+          'font-weight:bold;font-size:12px;color:#1a1a2e')
+
+    grupos: dict = {}
+    for t in titulos:
+        grupos.setdefault(_rotulo_contrato(t.get("codigoContrato")), []).append(t)
+
+    def _ordem(item):
+        rotulo, ts = item
+        # Sem contrato por último; entre os demais, o maior débito primeiro.
+        return (rotulo == "Sem contrato", -sum(float(x.get("total") or 0) for x in ts))
+
+    i = 0
+    for rotulo, ts in sorted(grupos.items(), key=_ordem):
+        if len(grupos) > 1:
+            sub = sum(float(x.get("total") or 0) for x in ts)
+            linhas.append(
+                f'<tr><td style="{tg}" colspan="{len(colunas) - 1}">'
+                f'{rotulo} · {len(ts)} título(s)</td>'
+                f'<td style="{tg};text-align:right">{brl(sub)}</td></tr>')
+        for t in sorted(ts, key=lambda x: str(x.get("dataVencimento"))):
+            fundo = "#ffffff" if i % 2 == 0 else "#f7f7f4"
+            i += 1
+            celulas = []
+            for campo, _, al in colunas:
+                v = t.get(campo)
+                if campo == "dataVencimento":
+                    txt = _dma(v)
+                elif campo == "dias_atraso":
+                    txt = "a vencer" if not v else f"{v} dias"
+                elif campo in ("saldo", "encargos", "total"):
+                    txt = brl(v or 0)
+                elif campo == "codigoContrato":
+                    txt = str(v or "").strip().lstrip("0") or "—"
+                else:
+                    txt = "—" if v in (None, "") else str(v)
+                celulas.append(f'<td style="{td};text-align:{al}">{txt}</td>')
+            linhas.append(f'<tr style="background:{fundo}">' + "".join(celulas) + "</tr>")
 
     soma_saldo = sum(float(t.get("saldo") or 0) for t in titulos)
     soma_enc = sum(float(t.get("encargos") or 0) for t in titulos)
@@ -202,7 +250,7 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
           'font-weight:bold;font-size:13px')
     rodape = (
         f'<tr>'
-        f'<td style="{tf};text-align:right" colspan="{5 + (1 if mostrar_cnpj else 0)}">'
+        f'<td style="{tf};text-align:right" colspan="{len(colunas) - 3}">'
         f'Total ({len(titulos)} título(s))</td>'
         f'<td style="{tf};text-align:right">{brl(soma_saldo)}</td>'
         f'<td style="{tf};text-align:right">{brl(soma_enc)}</td>'
