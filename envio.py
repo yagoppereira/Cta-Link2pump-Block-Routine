@@ -197,15 +197,34 @@ def _linha_log(campanha, job: Job, efetivo: Job, status: str, erro: str) -> dict
 
 def criar_enviador_smtp(remetente: str, senha_app: str,
                         nome_exibicao: str = "", reply_to: str = "",
-                        host: str = "smtp.gmail.com", porta: int = 587):
+                        host: str = "smtp.gmail.com", porta: int = 587,
+                        logo_path: str = None, logo_cid: str = None):
     """Devolve um enviar_fn(job) que manda via SMTP com HTML e texto puro.
 
     Use senha de app, nunca a senha da conta. Guarde em Secrets do Colab —
     uma senha colada na célula vai para o histórico do notebook.
+
+    logo_path: imagem da assinatura, EMBUTIDA na mensagem como parte inline e
+    referenciada no HTML por cid:. É o único jeito que funciona sem depender de
+    hospedagem: URL `raw` de repositório privado do GitHub pede autenticação,
+    link do Drive falha na maioria dos clientes, e a imagem da assinatura do
+    Gmail tem URL autenticada que só aparece para o próprio remetente.
+    Ausente ou inexistente, a assinatura sai sem imagem — e não quebra.
     """
     import smtplib
     from email.message import EmailMessage
     from email.utils import formataddr
+    from pathlib import Path
+
+    logo_bytes = None
+    if logo_path:
+        p = Path(logo_path)
+        if p.is_file():
+            logo_bytes = p.read_bytes()
+            print(f"  logo embutido: {p.name} ({len(logo_bytes) // 1024} KB)")
+        else:
+            print(f"  AVISO: logo não encontrado em '{logo_path}'. "
+                  f"A assinatura sai sem imagem.")
 
     def enviar(job: Job):
         msg = EmailMessage()
@@ -218,6 +237,15 @@ def criar_enviador_smtp(remetente: str, senha_app: str,
         msg["Subject"] = job.assunto
         msg.set_content(job.texto)
         msg.add_alternative(job.html, subtype="html")
+
+        if logo_bytes:
+            # Anexa na PARTE HTML, não na mensagem: assim o MIME vira
+            # multipart/related e o cliente resolve o cid dentro do HTML.
+            # Anexado na raiz, viraria anexo comum e o cid não resolveria.
+            sub, _, ext = "image", None, Path(logo_path).suffix.lower().lstrip(".")
+            msg.get_payload()[-1].add_related(
+                logo_bytes, maintype=sub, subtype=ext or "png",
+                cid=f"<{logo_cid}>", filename=Path(logo_path).name)
 
         with smtplib.SMTP(host, porta, timeout=30) as s:
             s.starttls()
