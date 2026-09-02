@@ -212,7 +212,12 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
     # ponte: a aba NFSe_Titulos, colada do export do CIGAM.
     # Sem a ponte a coluna não aparece — em vez de repetir o documento, que foi
     # o que aconteceu antes e passou por número de nota em 37 linhas.
-    if any(str(t.get("nfse") or "").strip() for t in titulos):
+    # Só mostra se houver NFS-e de verdade — ou seja, diferente do documento.
+    # Trava dupla: se algum dia outra fonte voltar a preencher `nfse` com a
+    # fatura, a coluna continua fora em vez de repetir o documento.
+    if any(str(t.get("nfse") or "").strip()
+           and str(t.get("nfse")).strip() != str(t.get("doc") or "").strip()
+           for t in titulos):
         colunas.insert(1, COLUNA_NFSE)
     if mostrar_cnpj:
         colunas = [COLUNA_CNPJ] + colunas
