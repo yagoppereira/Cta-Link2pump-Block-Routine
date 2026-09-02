@@ -28,10 +28,11 @@ REMETENTE_CARGO = "Analista de Cobrança"
 WHATSAPP = "(51) 99888-0734"
 SITE = "www.ctasmart.com.br"
 
-CORPO_HTML = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1a2e;line-height:1.6;max-width:720px">
+CORPO_HTML = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1a2e;line-height:1.6;max-width:860px">
 <p>Prezado Cliente,</p>
 <p>Identificamos que sua empresa mantém o uso ativo de nossos serviços; no entanto,
 constam em nosso sistema débitos residuais pendentes de regularização.</p>
+{destaque}
 <p>Nosso objetivo é evitar qualquer impacto em suas operações. Por isso, apresentamos
 abaixo o quadro de cobranças em aberto e estamos à disposição para definirmos,
 juntos, a melhor forma de quitação:</p>
@@ -47,6 +48,46 @@ poderá ser temporariamente suspenso até que resolvam as pendências.</p>
 <a href="https://{site}" style="color:#382fd8">{site}</a>
 </p>
 </div>"""
+
+
+def quadro_destaque(titulos: list, campanha) -> str:
+    """Total e prazo no topo, antes da tabela.
+
+    O total estava só no rodapé, depois de 37 linhas — quem abre o e-mail no
+    celular rola tudo antes de descobrir quanto deve. Aqui é a primeira coisa
+    que aparece depois do parágrafo de abertura.
+
+    Montado com <table> e não com div/flex: Outlook ignora flexbox, e o bloco
+    apareceria empilhado e sem alinhamento.
+    """
+    total = sum(float(t.get("total") or 0) for t in titulos)
+    saldo = sum(float(t.get("saldo") or 0) for t in titulos)
+    encargos = total - saldo
+
+    celula = ("padding:14px 18px;background:#1a1a2e;color:#ffffff;"
+              "font-family:Arial,Helvetica,sans-serif;vertical-align:middle")
+    rotulo = "font-size:11px;color:#19e098;letter-spacing:.5px;text-transform:uppercase"
+
+    return (
+        '<table cellpadding="0" cellspacing="0" role="presentation" '
+        'style="border-collapse:collapse;width:100%;margin:18px 0">'
+        f'<tr>'
+        f'<td style="{celula}">'
+        f'<div style="{rotulo}">Total a regularizar</div>'
+        f'<div style="font-size:30px;font-weight:bold;line-height:1.2;'
+        f'white-space:nowrap">{brl(total)}</div>'
+        f'<div style="font-size:11px;color:#a9b0c0">'
+        f'{brl(saldo)} de principal + {brl(encargos)} de juros e multa</div>'
+        f'</td>'
+        f'<td style="{celula};text-align:right;border-left:1px solid #3a3a52">'
+        f'<div style="{rotulo}">Regularizar até</div>'
+        f'<div style="font-size:22px;font-weight:bold;line-height:1.2;'
+        f'white-space:nowrap">{_dma(campanha.data_limite)}</div>'
+        f'<div style="font-size:11px;color:#a9b0c0">'
+        f'{len(titulos)} título(s) em aberto</div>'
+        f'</td>'
+        f'</tr></table>'
+    )
 
 
 def limpar_nome_bomba(bomba_nome: str, nome_cliente: str) -> str:
@@ -188,7 +229,7 @@ COLUNAS = [
     ("dataVencimento", "Vencimento", "center"),
     ("dias_atraso", "Atraso", "center"),
     ("saldo", "Saldo", "right"),
-    ("encargos", "Juros e multa", "right"),
+    ("encargos", "Encargos", "right"),
     ("total", "Total", "right"),
 ]
 
@@ -222,8 +263,10 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
     if mostrar_cnpj:
         colunas = [COLUNA_CNPJ] + colunas
     th = ('padding:8px 10px;background:#1a1a2e;color:#19e098;'
-          'font-weight:bold;font-size:12px;border:1px solid #1a1a2e')
-    td = 'padding:7px 10px;border:1px solid #d3d1c7;font-size:13px'
+          'font-weight:bold;font-size:12px;border:1px solid #1a1a2e;'
+          'white-space:nowrap')
+    td = ('padding:7px 10px;border:1px solid #d3d1c7;font-size:13px;'
+          'white-space:nowrap')
 
     cab = "".join(
         f'<th style="{th};text-align:{al}">{rot}</th>' for _, rot, al in colunas
@@ -276,8 +319,8 @@ def montar_quadro(titulos: list, data_envio, mostrar_cnpj: bool = False) -> str:
     soma_enc = sum(float(t.get("encargos") or 0) for t in titulos)
     soma_tot = sum(float(t.get("total") or 0) for t in titulos)
 
-    tf = ('padding:9px 10px;border:1px solid #d3d1c7;background:#e1f5ee;'
-          'font-weight:bold;font-size:13px')
+    tf = ('padding:11px 10px;border:1px solid #1a1a2e;background:#19e098;'
+          'font-weight:bold;font-size:14px;color:#1a1a2e;white-space:nowrap')
     rodape = (
         f'<tr>'
         f'<td style="{tf};text-align:right" colspan="{len(colunas) - 3}">'
@@ -325,6 +368,7 @@ def montar_email(cliente, titulos: list, campanha) -> dict:
     )
 
     html = CORPO_HTML.format(
+        destaque=quadro_destaque(titulos, campanha),
         quadro=montar_quadro(titulos, campanha.data_envio, mostrar_cnpj=varios),
         data_limite=_dma(campanha.data_limite),
         whatsapp=WHATSAPP,
