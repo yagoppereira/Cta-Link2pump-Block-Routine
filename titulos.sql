@@ -52,7 +52,13 @@ SELECT
   t.nomeCompleto                   AS nome_cliente,
   t.codigoLancamento,                                   -- chave do título no log
   t.fatura                         AS doc,
-  t.nf                             AS nfse,             -- nulo em aluguel
+  -- NÃO selecionar `t.nf` como nfse: ele é IGUAL ao `fatura`, e preenchê-lo
+  -- fazia a coluna NFS-e aparecer no e-mail com o documento repetido em todas
+  -- as linhas — 20288234 | 20288234 — passando por número de nota.
+  -- A NFS-e real é o campo NF_SERVICO do relatório do CIGAM, que não existe em
+  -- nenhuma tabela do warehouse (conferido nome a nome em bronze e silver).
+  -- A única origem é a ponte em nfse.py, pela aba NFSe_Titulos. Sem a aba, a
+  -- coluna não aparece.
   t.dataVencimento,
   t.saldo,                                              -- base do cálculo
   GREATEST(0, DATE_DIFF(@data_envio, t.dataVencimento, DAY)) AS dias_atraso,
