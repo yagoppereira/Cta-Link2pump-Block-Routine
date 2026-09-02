@@ -169,7 +169,7 @@ def ler_aba_procurando_cabecalho(planilha, nome: str, obrigatorias: list,
 
 def escrever_aba(planilha, nome: str, df, limpar: bool = True):
     """Escreve um DataFrame. resize=True é o que impede o truncamento."""
-    import pandas as pd  # noqa: F401
+    import pandas as pd
 
     n_linhas = max(100, len(df) + 20)
     n_colunas = max(26, len(df.columns) + 2)
@@ -210,15 +210,25 @@ def escrever_aba(planilha, nome: str, df, limpar: bool = True):
     com_retry(ws.freeze, rows=0)
 
     pronto = _para_sheets(df)
-    com_retry(set_with_dataframe, ws, pronto,
-              include_index=False, include_column_header=True,
-              resize=True)   # <- não remova
+
+    # DataFrame vazio precisa de tratamento ANTES do set_with_dataframe, não
+    # depois. pd.DataFrame([]) não tem linhas NEM colunas, e resize=True tenta
+    # encolher a aba para 0x0 — o Google recusa com "não é possível excluir
+    # todas as colunas". A Triagem sair vazia é o melhor resultado possível e
+    # derrubava a rodada.
+    if len(pronto.columns) == 0:
+        pronto = pd.DataFrame({"resultado": []})
 
     if len(pronto) == 0:
-        # Aba só com cabeçalho: garante espaço para congelar a primeira linha
-        # e deixa explícito que o vazio é resultado, não falha de escrita.
-        com_retry(ws.resize, rows=2, cols=max(len(df.columns), 1))
-        com_retry(ws.update, "A2", [["(nenhum registro nesta campanha)"]])
+        com_retry(ws.resize, rows=2, cols=max(len(pronto.columns), 1))
+        com_retry(set_with_dataframe, ws, pronto,
+                  include_index=False, include_column_header=True,
+                  resize=False)
+        com_retry(ws.update, [["(nenhum registro nesta campanha)"]], "A2")
+    else:
+        com_retry(set_with_dataframe, ws, pronto,
+                  include_index=False, include_column_header=True,
+                  resize=True)   # <- não remova
 
     com_retry(ws.freeze, rows=1)
     return ws
