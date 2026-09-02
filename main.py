@@ -423,7 +423,9 @@ def preparar(c, gc, bq) -> dict:
     io.escrever_aba(p1, ABA_PREVIA, pd.DataFrame(previa))
     io.escrever_aba(p1, ABA_TITULOS, df_tit)
     io.escrever_aba(p1, ABA_BOMBAS, df_bmb)
-    io.escrever_aba(p1, ABA_TRIAGEM, pd.DataFrame(triagem))
+    io.escrever_aba(p1, ABA_TRIAGEM, pd.DataFrame(
+        triagem, columns=["id_campanha", "codigo_cliente", "nome_cliente",
+                          "caso", "detalhe"]))
 
     total = sum(p["total"] for p in previa)
     print(f"\nCONGELADO: {len(previa)} cliente(s), {len(df_tit)} título(s), "
