@@ -380,8 +380,18 @@ def backfill_registro(gc, c):
         except ValueError:
             return 0.0
 
+    # Conta só PRODUCAO. Filtrar apenas por status contava junto os e-mails de
+    # teste, que foram para a própria caixa: 38 clientes apareciam com 39
+    # envios, e um "cliente cobrado duas vezes" que não existiu.
+    # Linha sem modo é de antes da separação por modo: assume produção, que é
+    # o lado conservador para um número que descreve o que foi cobrado.
     log = _linhas(ABA_LOG)
-    enviados = [l for l in log if str(l.get("status") or "").upper() == "ENVIADO"]
+    enviados = [l for l in log
+                if str(l.get("status") or "").upper() == "ENVIADO"
+                and str(l.get("modo") or "PRODUCAO").upper() == "PRODUCAO"]
+    testes = [l for l in log
+              if str(l.get("status") or "").upper() == "ENVIADO"
+              and str(l.get("modo") or "").upper() == "TESTE"]
 
     registrar(gc, c, "preparado (backfill)",
               clientes=len(previa),
@@ -391,7 +401,8 @@ def backfill_registro(gc, c):
     if enviados:
         registrar(gc, c, "disparado (backfill)", enviados=len(enviados))
     print(f"'{c.id_campanha}' registrada: {len(previa)} cliente(s), "
-          f"{len(enviados)} enviado(s).")
+          f"{len(enviados)} enviado(s) em produção"
+          + (f" ({len(testes)} de teste, não contados)." if testes else "."))
 
 
 def abrir_campanha(gc, id_campanha: str = None,
