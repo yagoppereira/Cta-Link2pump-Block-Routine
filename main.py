@@ -322,157 +322,75 @@ def criar_painel_campanhas(gc):
     except Exception:
         pass
 
-    ws = p1.add_worksheet(title=ABA_PAINEL_CAMPANHAS, rows="200", cols="26")
+    ws = p1.add_worksheet(title=ABA_PAINEL_CAMPANHAS, rows="300", cols="14")
 
-    # A fórmula NÃO escolhe colunas por posição. A ordem do cabeçalho da aba
-    # Campanhas é definida no primeiro append e eu não a conheço aqui —
-    # referenciar Col5, Col6 seria adivinhar e sair errado em silêncio.
-    # `select *` traz tudo com o cabeçalho, mais recente primeiro, e você
-    # esconde, reordena ou soma o que quiser sem o script atropelar.
-    ws.update(
-        [["Controle de campanhas"],
-         ["Lê a aba Campanhas (append-only, escrita pelo script). "
-          "Esta aba é sua: o script não reescreve nada aqui."],
-         [],
-         [f'=IFERROR(QUERY({ABA_CAMPANHAS}!A:Z;'
-          f'"select * order by Col1 desc";1);'
-          f'"(nenhuma campanha registrada ainda — rode preparar())")']],
-        "A1", value_input_option="USER_ENTERED")
+    # As fórmulas buscam a coluna PELO NOME, com MATCH no cabeçalho. Posição
+    # fixa (Col5, Col6) quebraria: o append_log acrescenta coluna nova quando
+    # uma fase traz métrica que ainda não existe, e a ordem muda.
+    A = ABA_CAMPANHAS
+
+    def v(fase, coluna, id_ref="$B$4"):
+        """Valor de uma métrica, da última linha daquela fase da campanha."""
+        return (f'=IFERROR(INDEX(FILTER({A}!$A:$Z;'
+                f'{A}!$A:$A={id_ref};'
+                f'INDEX({A}!$A:$Z;0;MATCH("fase";{A}!$1:$1;0))="{fase}");'
+                f'COUNTA(FILTER({A}!$A:$A;{A}!$A:$A={id_ref};'
+                f'INDEX({A}!$A:$Z;0;MATCH("fase";{A}!$1:$1;0))="{fase}"));'
+                f'MATCH("{coluna}";{A}!$1:$1;0));"—")')
+
+    linhas = [
+        ["Controle de campanhas"],
+        [f"Lê a aba {A}, escrita pelo script. Esta aba é sua: nada aqui é "
+         f"sobrescrito."],
+        [],
+        ["Campanha:", f'=IFERROR(INDEX(SORT(UNIQUE(FILTER({A}!$A:$A;'
+                      f'{A}!$A:$A<>"";{A}!$A:$A<>"id_campanha"));1;0);1);"—")',
+         "", "(a mais recente; troque para ver outra)"],
+        [],
+        ["FUNIL DA RÉGUA"],
+        ["Clientes com dívida vencida",   v("regua", "com_divida")],
+        ["  fora por acordo vigente",     v("regua", "fora_acordo")],
+        ["  fora por Nunca_Notificar",    v("regua", "fora_excecoes")],
+        ["Passaram na frequência",        v("regua", "passou_frequencia")],
+        ["  fora por frequência própria", v("regua", "fora_freq_propria")],
+        ["  SEM ALOCAÇÃO (não avaliáveis)", v("regua", "sem_alocacao"),
+         v("regua", "valor_sem_alocacao"), "<- fila do mutirão"],
+        ["ENTRARAM NA RÉGUA",             v("regua", "entram"),
+         v("regua", "valor_entram")],
+        [],
+        ["PARÂMETROS USADOS"],
+        ["freq_minima",          v("regua", "freq_minima")],
+        ["freq_propria_minima",  v("regua", "freq_propria_minima")],
+        ["dias_uso",             v("regua", "dias_uso")],
+        [],
+        ["RESULTADO"],
+        ["Clientes congelados",  v("preparado", "clientes")],
+        ["Valor cobrado",        v("preparado", "valor_cobrado")],
+        ["E-mails enviados",     v("disparado", "enviados")],
+        ["  falhas",             v("disparado", "falhas")],
+        ["Quitaram",             v("reconciliado", "quitou")],
+        ["Pagaram em parte",     v("reconciliado", "pagou_parcial")],
+        ["Mantêm bloqueio",      v("reconciliado", "mantem_bloqueio")],
+        ["VALOR RECUPERADO",     v("reconciliado", "valor_recuperado")],
+        ["% do cobrado",
+         '=IFERROR(IF(N(B28)=0;"—";TEXT(N(B28)/N(B22);"0,0%"));"—")'],
+        [],
+        ["HISTÓRICO — todas as linhas, mais recente primeiro"],
+        [f'=IFERROR(QUERY({A}!A:Z;"select * order by Col1 desc";1);'
+         f'"(nada registrado ainda)")'],
+    ]
+    ws.update(linhas, "A1", value_input_option="USER_ENTERED")
+
+    for faixa in ("A1", "A6", "A15", "A20", "A31"):
+        ws.format(faixa, {"textFormat": {"bold": True}})
     ws.format("A1", {"textFormat": {"bold": True, "fontSize": 13}})
-    ws.format("A2", {"textFormat": {"fontSize": 9, "foregroundColor":
-                                    {"red": .5, "green": .5, "blue": .5}}})
+    ws.format("A13:C13", {"textFormat": {"bold": True}})
+    ws.format("A28:C28", {"textFormat": {"bold": True}})
+    ws.format("A2", {"textFormat": {"fontSize": 9,
+                     "foregroundColor": {"red": .5, "green": .5, "blue": .5}}})
     ws.freeze(rows=4)
-    print(f"'{ABA_PAINEL_CAMPANHAS}' criada. Ajuste como quiser — "
-          f"o script não reescreve esta aba.")
-
-
-def backfill_registro(gc, c):
-    """Grava no registro uma campanha que já foi congelada antes de o
-    registrar() existir.
-
-    Sem isto a única forma de povoar o registro seria rodar preparar() de
-    novo — e isso recongela os encargos com a data de hoje, mudando valores
-    que o cliente já recebeu por e-mail. O backfill lê o que está congelado e
-    registra, sem tocar no snapshot.
-    """
-    p1 = io.abrir(gc, ID_DESTINO)
-
-    def _linhas(aba):
-        return [l for l in io.ler_aba(p1, aba, obrigatoria=False)
-                if str(l.get("id_campanha") or "").strip() == c.id_campanha]
-
-    previa = _linhas(ABA_PREVIA)
-    if not previa:
-        raise RuntimeError(f"'{c.id_campanha}' não tem prévia congelada.")
-
-    ja = [l for l in io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
-          if str(l.get("id_campanha") or "").strip() == c.id_campanha]
-    if ja:
-        print(f"'{c.id_campanha}' já tem {len(ja)} linha(s) no registro; "
-              f"não gravei de novo.")
-        return
-
-    def _n(v):
-        t = str(v or 0).strip().replace("R$", "").strip()
-        t = t.replace(".", "").replace(",", ".") if "," in t else t
-        try:
-            return float(t or 0)
-        except ValueError:
-            return 0.0
-
-    # Conta só PRODUCAO. Filtrar apenas por status contava junto os e-mails de
-    # teste, que foram para a própria caixa: 38 clientes apareciam com 39
-    # envios, e um "cliente cobrado duas vezes" que não existiu.
-    # Linha sem modo é de antes da separação por modo: assume produção, que é
-    # o lado conservador para um número que descreve o que foi cobrado.
-    log = _linhas(ABA_LOG)
-    enviados = [l for l in log
-                if str(l.get("status") or "").upper() == "ENVIADO"
-                and str(l.get("modo") or "PRODUCAO").upper() == "PRODUCAO"]
-    testes = [l for l in log
-              if str(l.get("status") or "").upper() == "ENVIADO"
-              and str(l.get("modo") or "").upper() == "TESTE"]
-
-    registrar(gc, c, "preparado (backfill)",
-              clientes=len(previa),
-              titulos=len(_linhas(ABA_TITULOS)),
-              bombas=len(_linhas(ABA_BOMBAS)),
-              valor_cobrado=round(sum(_n(l.get("total")) for l in previa), 2))
-    if enviados:
-        registrar(gc, c, "disparado (backfill)", enviados=len(enviados))
-    print(f"'{c.id_campanha}' registrada: {len(previa)} cliente(s), "
-          f"{len(enviados)} enviado(s) em produção"
-          + (f" ({len(testes)} de teste, não contados)." if testes else "."))
-
-
-def abrir_campanha(gc, id_campanha: str = None,
-                   copia_padrao=("contato.financeiro@ctasmart.com.br",),
-                   teto_diario: int = 450) -> "campanha_v2.Campanha":
-    """REABRE uma campanha existente em vez de criar outra.
-
-    Faltava isto: nova_campanha() sempre gera id novo, então uma sessão nova do
-    Colab perdia o vínculo com o que já foi congelado e enviado. Se o runtime
-    cai no meio de um disparo, ou se o log é limpo, a campanha continua na
-    planilha e o notebook não a alcança mais.
-
-    Sem id, reabre a MAIS RECENTE que tem prévia congelada — que é o que se
-    quer em 99% dos casos: continuar de onde parou.
-
-    As datas vêm do registro, nunca de hoje: `data_envio` é a âncora dos
-    encargos já calculados, e recalcular com a data de hoje mudaria valores que
-    o cliente já recebeu por e-mail.
-    """
-    p1 = io.abrir(gc, ID_DESTINO)
-
-    congeladas = {str(l.get("id_campanha") or "").strip()
-                  for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)}
-    congeladas.discard("")
-    if not congeladas:
-        raise RuntimeError(
-            f"Nenhuma campanha congelada em '{ABA_PREVIA}'. "
-            f"Use nova_campanha() + preparar() para começar uma.")
-
-    if id_campanha is None:
-        id_campanha = sorted(congeladas)[-1]
-        if len(congeladas) > 1:
-            print(f"  {len(congeladas)} campanha(s) congelada(s): "
-                  f"{', '.join(sorted(congeladas))}")
-    elif id_campanha not in congeladas:
-        raise RuntimeError(
-            f"'{id_campanha}' não tem prévia congelada. "
-            f"Disponíveis: {', '.join(sorted(congeladas))}")
-
-    # Datas do registro. Se o registro não tiver (campanha anterior ao
-    # registrar()), pede explicitamente em vez de inventar.
-    reg = [l for l in io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
-           if str(l.get("id_campanha") or "").strip() == id_campanha
-           and str(l.get("data_envio") or "").strip()]
-    if not reg:
-        raise RuntimeError(
-            f"'{id_campanha}' está congelada mas não tem datas em "
-            f"'{ABA_CAMPANHAS}'. Passe à mão:\n"
-            f"  c = campanha_v2.Campanha(id_campanha='{id_campanha}', "
-            f"data_envio=date(A,M,D), data_limite=date(A,M,D))\n"
-            f"A data_envio tem de ser a do disparo original — ela é a âncora "
-            f"dos encargos que o cliente já recebeu.")
-
-    from datetime import date as _date
-    ultimo = reg[-1]
-    def _d(txt):
-        a, m, d = str(txt).strip()[:10].split("-")
-        return _date(int(a), int(m), int(d))
-
-    c = campanha_v2.Campanha(
-        id_campanha=id_campanha,
-        data_envio=_d(ultimo["data_envio"]),
-        data_limite=_d(ultimo["data_limite"]),
-        copia_padrao=tuple(copia_padrao), teto_diario=teto_diario,
-    )
-    n = sum(1 for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
-            if str(l.get("id_campanha") or "").strip() == id_campanha)
-    print(f"{c.id_campanha} reaberta | envio {c.data_envio:%d/%m/%Y} | "
-          f"limite {c.data_limite:%d/%m/%Y} | {n} cliente(s) congelado(s)")
-    return c
+    print(f"'{ABA_PAINEL_CAMPANHAS}' criada: funil da régua, parâmetros, "
+          f"resultado e histórico. O script não reescreve esta aba.")
 
 
 def registrar(gc, c, fase: str, **metricas):
@@ -502,7 +420,8 @@ def registrar(gc, c, fase: str, **metricas):
 
 
 def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
-               dias_uso: int = 90, escrever: bool = True) -> list:
+               dias_uso: int = 90, escrever: bool = True,
+               campanha=None) -> list:
     """Aplica a REGRA DE BLOQUEIO e escreve a Campanha_Input.
 
         deve a X frequência  E  tem uso recente  ->  entra na régua
@@ -619,6 +538,10 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     sql = sql.replace("DECLARE dias_uso_recente INT64 DEFAULT 90;",
                       f"DECLARE dias_uso_recente INT64 DEFAULT {int(dias_uso)};")
     df = bq.query(sql).to_dataframe(create_bqstorage_client=False)
+    n_com_divida = len(df)
+    n_fora_juridico = 0      # a query já exclui X91/X92; medido abaixo se houver
+    n_fora_excecoes = 0
+    n_fora_acordo = 0
 
     if bloqueados or por_sistema:
         na_lista = (df.codigo.isin(bloq_cadastro)
@@ -723,6 +646,28 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
         print(f"  {len(quebrados)} com ACORDO QUEBRADO — já tiveram uma chance:")
         for r in quebrados.itertuples():
             print(f"     {r.codigo} {str(r.cliente)[:30]}")
+
+    # Grava o FUNIL. Sem isto os números da régua morrem com a sessão do
+    # Colab: quantos foram avaliados, quantos passaram em cada condição,
+    # quantos saíram por acordo ou por exclusão permanente. É o que permite
+    # comparar campanhas e responder "por que a de outubro pegou menos gente".
+    if campanha is not None and escrever:
+        registrar(
+            gc, campanha, "regua",
+            freq_minima=freq_minima, freq_propria_minima=freq_propria_minima,
+            dias_uso=dias_uso,
+            com_divida=n_com_divida,
+            fora_juridico=n_fora_juridico,
+            fora_excecoes=n_fora_excecoes,
+            fora_acordo=n_fora_acordo,
+            passou_frequencia=int(qualificado.sum()),
+            fora_freq_propria=len(so_pelo_grupo),
+            sem_alocacao=len(sem_uso),
+            entram=len(dentro),
+            valor_entram=round(float(dentro.em_atraso.astype(float).sum()), 2),
+            valor_sem_alocacao=round(float(sem_uso.em_atraso.astype(float).sum()), 2)
+                               if len(sem_uso) else 0.0,
+        )
 
     if escrever and len(dentro):
         import pandas as pd
