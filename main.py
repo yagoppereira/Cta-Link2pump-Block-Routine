@@ -415,13 +415,22 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
                 continue
             if len(digitos) <= 6:
                 k = digitos.zfill(6); bloq_cadastro.add(k)
-            elif len(digitos) in (8, 11, 14):
-                k = digitos[:8]; bloq_raiz.add(k)
+            elif len(digitos) in (7, 8, 10, 11, 13, 14):
+                # 7, 10 e 13 dígitos = o Sheets comeu o zero à esquerda. Raiz
+                # 07636657 (Aço Verde) entra como 7636657 e a exclusão falhava
+                # em silêncio: dois cadastros dela receberam e-mail de teste.
+                # Zero-padding para o comprimento canônico mais próximo.
+                canonico = {7: 8, 10: 11, 13: 14}.get(len(digitos), len(digitos))
+                if canonico != len(digitos):
+                    print(f"     {bruto!r}: {len(digitos)} dígitos — zero à "
+                          f"esquerda comido pelo Sheets, lendo como "
+                          f"{digitos.zfill(canonico)[:8]}")
+                k = digitos.zfill(canonico)[:8]; bloq_raiz.add(k)
             else:
                 # Não inventa interpretação: 7, 9 ou 12 dígitos sem prefixo não
                 # é código, nem raiz, nem sistema declarado. Avisa e ignora.
                 ignoradas.append(
-                    (bruto, f"{len(digitos)} dígitos — use 6 (código), "
+                    (bruto, f"{len(digitos)} dígitos — use até 6 (código), "
                             f"8/11/14 (CNPJ) ou ID(...) para cliente_id"))
                 continue
         motivo_de[k] = motivo
@@ -465,6 +474,27 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
                     | df.codigo.isin(por_sistema))
         vetados = df[na_lista]
         df = df[~na_lista]
+        # Chave que não excluiu NINGUÉM quase sempre é erro de digitação, e
+        # falha em silêncio: você acha que protegeu a conta e não protegeu.
+        # Foi assim que a Aço Verde recebeu e-mail de teste — a raiz 07636657
+        # entrou como 7636657 e não casou com nada.
+        sem_efeito = []
+        for k, motivo in sorted(motivo_de.items()):
+            se_pegou = (
+                (k in bloq_cadastro and (df.codigo == k).any())
+                or (k in bloq_raiz and (df.cnpj_raiz == k).any())
+                or (k in bloq_sistema and bool(cadastros_do_sistema.get(k)))
+                or (k in bloq_cadastro and (vetados.codigo == k).any())
+                or (k in bloq_raiz and (vetados.cnpj_raiz == k).any())
+            )
+            if not se_pegou:
+                sem_efeito.append((k, motivo))
+        if sem_efeito:
+            print(f"  {len(sem_efeito)} chave(s) de '{ABA_EXCECOES}' NÃO "
+                  f"excluíram ninguém — confira se estão certas:")
+            for k, motivo in sem_efeito:
+                print(f"     {k}  ({motivo})")
+
         if len(vetados):
             print(f"{len(vetados)} cadastro(s) fora por '{ABA_EXCECOES}' "
                   f"(R$ {vetados.em_atraso.astype(float).sum():,.2f}):")
@@ -770,8 +800,13 @@ def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
         fila, c,
         enviar_fn=enviar_fn or (lambda job: None),
         log_fn=lambda linha: io.append_log(p1, ABA_LOG, linha),
-        chaves_ja_enviadas=io.chaves_ja_enviadas(p1, ABA_LOG, c.id_campanha,
-                                                 modo=c.modo),
+        # ENSAIO consulta o log de PRODUÇÃO, não o dele próprio. O ensaio
+        # simula produção: se ele usasse o próprio modo, não mostraria quem
+        # seria pulado e deixaria de ser portão — o número que interessa é
+        # quantos SAIRIAM de verdade agora.
+        chaves_ja_enviadas=io.chaves_ja_enviadas(
+            p1, ABA_LOG, c.id_campanha,
+            modo="PRODUCAO" if c.modo == "DRY_RUN" else c.modo),
     )
     print(r.resumo())
     registrar(gc, c, "disparado",
@@ -782,6 +817,41 @@ def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
 
 
 # ------------------------------------------------------------------- fase C
+
+
+def atualizar_painel(c, gc, saldo_hoje=None, seriais_hoje=None):
+    """Monta e escreve o Painel_Bloqueio. Pode rodar em qualquer momento.
+
+    Virou função porque a versão em célula usava l["id_campanha"] com colchete
+    e lia a Campanha_Previa como obrigatória: sem o preparar() a aba não
+    existe, e a linha "(nenhum registro nesta campanha)" — que eu escrevo
+    quando um DataFrame sai vazio — não tem essa chave. Os dois casos
+    estouravam em vez de dizer o que faltava.
+    """
+    import painel
+
+    p1 = io.abrir(gc, ID_DESTINO)
+
+    def _da_campanha(aba):
+        return [l for l in io.ler_aba(p1, aba, obrigatoria=False)
+                if str(l.get("id_campanha") or "") == c.id_campanha]
+
+    previa = _da_campanha(ABA_PREVIA)
+    if not previa:
+        print(f"Nada em '{ABA_PREVIA}' para {c.id_campanha}. "
+              f"Rode preparar() antes — o painel descreve o que foi congelado.")
+        return []
+
+    linhas = painel.montar(
+        previa=previa,
+        log=io.ler_aba(p1, ABA_LOG, obrigatoria=False),
+        campanha=c,
+        bombas_snapshot=_da_campanha(ABA_BOMBAS),
+        saldo_hoje=saldo_hoje,
+        seriais_hoje=seriais_hoje,
+    )
+    painel.escrever(p1, linhas, io)
+    return linhas
 
 
 def reconciliar(c, gc, bq) -> dict:
