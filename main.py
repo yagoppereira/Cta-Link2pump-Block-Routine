@@ -33,7 +33,8 @@ from pathlib import Path
 import pandas as pd
 from google.cloud import bigquery
 
-import campanha_v2 as cfg
+import campanha_v2
+import campanha_v2 as cfg   # apelido histórico; os dois nomes valem
 import encargos
 import envio
 import io_sheets as io
