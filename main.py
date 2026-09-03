@@ -820,7 +820,7 @@ def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
 # ------------------------------------------------------------------- fase C
 
 
-def atualizar_painel(c, gc, saldo_hoje=None, seriais_hoje=None):
+def atualizar_painel(c, gc, bq=None, saldo_hoje=None, seriais_hoje=None):
     """Monta e escreve o Painel_Bloqueio. Pode rodar em qualquer momento.
 
     Virou função porque a versão em célula usava l["id_campanha"] com colchete
@@ -842,6 +842,22 @@ def atualizar_painel(c, gc, saldo_hoje=None, seriais_hoje=None):
         print(f"Nada em '{ABA_PREVIA}' para {c.id_campanha}. "
               f"Rode preparar() antes — o painel descreve o que foi congelado.")
         return []
+
+    # Consulta os seriais de HOJE quando `bq` está disponível. Sem isso o
+    # painel não tem como distinguir "bomba bloqueada" de "não fui olhar", e
+    # None é o único valor honesto — a etapa BLOQUEADO simplesmente não sai.
+    if seriais_hoje is None and bq is not None:
+        seriais_hoje = {
+            str(r.serial) for r in bq.query(f"""
+                SELECT DISTINCT CAST(serial_equipamento AS STRING) AS serial
+                FROM `{PROJECT_ID}.gold.bombas_alocadas`
+                WHERE serial_equipamento IS NOT NULL
+            """).result()
+        }
+        print(f"  {len(seriais_hoje)} serial(is) hoje em gold.bombas_alocadas")
+    elif seriais_hoje is None:
+        print("  sem `bq`: não consultei os seriais, então a etapa BLOQUEADO "
+              "não será derivada (ausência de dado não é bloqueio)")
 
     linhas = painel.montar(
         previa=previa,
