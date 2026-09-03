@@ -234,6 +234,15 @@ def escrever_aba(planilha, nome: str, df, limpar: bool = True):
     return ws
 
 
+def _col_letra(n: int) -> str:
+    """1 -> A, 26 -> Z, 27 -> AA. Para montar o range do cabeçalho."""
+    letras = ""
+    while n > 0:
+        n, resto = divmod(n - 1, 26)
+        letras = chr(65 + resto) + letras
+    return letras
+
+
 def append_log(planilha, nome: str, linha: dict):
     """Acrescenta UMA linha. Cria a aba e o cabeçalho na primeira chamada.
 
@@ -253,8 +262,28 @@ def append_log(planilha, nome: str, linha: dict):
         com_retry(ws.append_row, colunas, value_input_option="RAW")
         cab = colunas
 
-    # Segue a ordem do cabeçalho existente: se alguém acrescentar coluna
-    # depois, as linhas antigas continuam alinhadas.
+    # Chave que não está no cabeçalho é ACRESCENTADA, não descartada.
+    #
+    # Antes a linha era montada só com as colunas existentes, e o resto sumia
+    # em silêncio. Como a primeira gravação da aba Campanhas foi a fase
+    # "preparado" (clientes, titulos, bombas, valor_cobrado), as fases
+    # seguintes perdiam TUDO: enviados, pulados, falhas, valor_recuperado —
+    # exatamente os números pelos quais a campanha é julgada.
+    #
+    # O log de mensagens não sofria porque todas as linhas têm as mesmas
+    # chaves; o registro de campanhas tem uma forma por fase.
+    novas = [c for c in colunas if c not in cab]
+    if novas:
+        cab = list(cab) + novas
+        if len(cab) > ws.col_count:
+            com_retry(ws.resize, rows=ws.row_count, cols=len(cab) + 2)
+        com_retry(ws.update, [cab], f"A1:{_col_letra(len(cab))}1",
+                  value_input_option="RAW")
+        print(f"  ('{nome}': {len(novas)} coluna(s) nova(s) — "
+              f"{', '.join(novas)})")
+
+    # Segue a ordem do cabeçalho: se alguém acrescentar coluna depois, as
+    # linhas antigas continuam alinhadas.
     com_retry(ws.append_row, [str(linha.get(c, "")) for c in cab],
               value_input_option="RAW")
 
