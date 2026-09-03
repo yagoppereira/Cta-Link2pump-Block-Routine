@@ -122,8 +122,10 @@ def disparar(fila: list,
     ja = set(chaves_ja_enviadas or ())
     campanha.checar_pode_enviar()          # recusa produção não confirmada
     redirecionar = campanha.redirecionar_para   # campo declarado, não getattr
+    ensaio = campanha.dry_run
     print(f"modo: {campanha.modo}"
-          + (f" -> tudo para {redirecionar}" if redirecionar else ""))
+          + (f" -> tudo para {redirecionar}" if redirecionar else "")
+          + (" -> NADA será enviado; relatório do que sairia" if ensaio else ""))
 
     for job in fila:
         if job.chave in ja:
@@ -139,6 +141,17 @@ def disparar(fila: list,
             continue
 
         efetivo = aplicar_redirecionamento(job, redirecionar) if redirecionar else job
+
+        # ENSAIO: a idempotência, o teto e a regra de "sem destinatário" já
+        # rodaram acima — o ensaio para exatamente antes do SMTP e do log.
+        # A contagem de destinatários usa os REAIS, não o redirecionamento,
+        # porque o número que interessa é o de produção.
+        if ensaio:
+            r.enviados.append(job.chave)
+            r.destinatarios_producao += len(job.para) + len(job.cc)
+            print(f"   {job.codigo_cliente:>6} {str(job.nome_cliente)[:26]:<26} "
+                  f"{len(job.para)} para + {len(job.cc)} cc")
+            continue
 
         # O teto conta o que REALMENTE sai (1 endereço em modo teste). Mas
         # acumulamos também o custo de produção, para o teste responder
