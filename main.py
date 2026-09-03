@@ -381,34 +381,82 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     # alguém esquece, e o esquecimento manda aviso de bloqueio para a Ipiranga.
     #
     # Aba Nunca_Notificar: chave | motivo
-    #   chave = código CIGAM (006 dígitos) OU raiz de CNPJ (8 dígitos)
-    #   a raiz pega o grupo inteiro de uma vez: Aço Verde tem 4 cadastros,
-    #   Rio Itá 4, Translovato 5 — listar um a um envelhece mal.
+    #   código CIGAM   6 dígitos   um cadastro
+    #   raiz de CNPJ   8 dígitos   o grupo todo (Aço Verde tem 4 cadastros,
+    #                              Rio Itá 4, Translovato 5)
+    #   cliente_id     9+ dígitos  o LOGIN do app — todos os cadastros que
+    #                              pagam por bomba daquele sistema
+    #
+    # O cliente_id existe para o caso que o código e a raiz não resolvem:
+    # login grande demais para bloquear. Um sistema pode ter bombas pagas por
+    # vários CNPJs sem relação entre si (a Deep paga por bomba do login 790099,
+    # que é da Concórdia), então excluir por CNPJ não protege o sistema e
+    # excluir o sistema não se expressa por CNPJ.
     excecoes = io.ler_aba(p1, ABA_EXCECOES, obrigatoria=False)
-    bloqueados, motivo_de = set(), {}
+    bloq_cadastro, bloq_raiz, bloq_sistema, motivo_de = set(), set(), set(), {}
     for l in excecoes:
         chave = re.sub(r"\D", "", str(l.get("chave") or l.get("codigo") or ""))
         if not chave:
             continue
-        chave = chave.zfill(6) if len(chave) <= 6 else chave[:8]
-        bloqueados.add(chave)
-        motivo_de[chave] = str(l.get("motivo") or "").strip() or "sem motivo informado"
+        motivo = str(l.get("motivo") or "").strip() or "sem motivo informado"
+        if len(chave) <= 6:
+            k = chave.zfill(6); bloq_cadastro.add(k)
+        elif len(chave) == 8:
+            k = chave; bloq_raiz.add(k)
+        elif len(chave) in (11, 14):
+            # CNPJ ou CPF completo colado: usa a raiz.
+            k = chave[:8]; bloq_raiz.add(k)
+        else:
+            k = chave; bloq_sistema.add(k)      # cliente_id do app
+        motivo_de[k] = motivo
+
+    # cliente_id -> cadastros que pagam por bomba daquele sistema
+    cadastros_do_sistema = {}
+    if bloq_sistema:
+        for r in bq.query(f"""
+            SELECT DISTINCT CAST(cliente_id AS STRING) AS cliente_id,
+                   cliente_cigam_pagante AS codigo
+            FROM `{PROJECT_ID}.gold.bombas_alocadas`
+            WHERE CAST(cliente_id AS STRING) IN UNNEST(@ids)
+        """, job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("ids", "STRING", sorted(bloq_sistema))
+             ])).result():
+            cadastros_do_sistema.setdefault(r.cliente_id, set()).add(r.codigo)
+        for sid, cods in cadastros_do_sistema.items():
+            print(f"  sistema {sid}: {len(cods)} cadastro(s) pagante(s) excluído(s)")
+        faltando = bloq_sistema - set(cadastros_do_sistema)
+        if faltando:
+            print(f"  AVISO: cliente_id sem bomba alocada, não excluiu nada: "
+                  f"{', '.join(sorted(faltando))}")
+
+    por_sistema = {c for cods in cadastros_do_sistema.values() for c in cods}
+    bloqueados = bloq_cadastro | bloq_raiz
 
     sql = (SQL / "base_inadimplencia.sql").read_text()
     sql = sql.replace("DECLARE dias_uso_recente INT64 DEFAULT 90;",
                       f"DECLARE dias_uso_recente INT64 DEFAULT {int(dias_uso)};")
     df = bq.query(sql).to_dataframe(create_bqstorage_client=False)
 
-    if bloqueados:
-        na_lista = df.codigo.isin(bloqueados) | df.cnpj_raiz.isin(bloqueados)
+    if bloqueados or por_sistema:
+        na_lista = (df.codigo.isin(bloq_cadastro)
+                    | df.cnpj_raiz.isin(bloq_raiz)
+                    | df.codigo.isin(por_sistema))
         vetados = df[na_lista]
         df = df[~na_lista]
         if len(vetados):
             print(f"{len(vetados)} cadastro(s) fora por '{ABA_EXCECOES}' "
                   f"(R$ {vetados.em_atraso.astype(float).sum():,.2f}):")
             for r in vetados.itertuples():
-                chave = r.codigo if r.codigo in motivo_de else r.cnpj_raiz
-                print(f"   {r.codigo} {str(r.cliente)[:32]:<32} {motivo_de.get(chave,'')}")
+                if r.codigo in motivo_de:
+                    chave, via = r.codigo, "código"
+                elif r.cnpj_raiz in motivo_de:
+                    chave, via = r.cnpj_raiz, "raiz"
+                else:
+                    chave = next((s for s, cods in cadastros_do_sistema.items()
+                                  if r.codigo in cods), None)
+                    via = f"sistema {chave}"
+                print(f"   {r.codigo} {str(r.cliente)[:30]:<30} "
+                      f"[{via}] {motivo_de.get(chave, '')}")
 
     qualificado = ((df.frequencia >= freq_minima)
                    & (df.frequencia_propria >= freq_propria_minima))
