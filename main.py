@@ -346,6 +346,54 @@ def criar_painel_campanhas(gc):
           f"o script não reescreve esta aba.")
 
 
+def backfill_registro(gc, c):
+    """Grava no registro uma campanha que já foi congelada antes de o
+    registrar() existir.
+
+    Sem isto a única forma de povoar o registro seria rodar preparar() de
+    novo — e isso recongela os encargos com a data de hoje, mudando valores
+    que o cliente já recebeu por e-mail. O backfill lê o que está congelado e
+    registra, sem tocar no snapshot.
+    """
+    p1 = io.abrir(gc, ID_DESTINO)
+
+    def _linhas(aba):
+        return [l for l in io.ler_aba(p1, aba, obrigatoria=False)
+                if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+
+    previa = _linhas(ABA_PREVIA)
+    if not previa:
+        raise RuntimeError(f"'{c.id_campanha}' não tem prévia congelada.")
+
+    ja = [l for l in io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
+          if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+    if ja:
+        print(f"'{c.id_campanha}' já tem {len(ja)} linha(s) no registro; "
+              f"não gravei de novo.")
+        return
+
+    def _n(v):
+        t = str(v or 0).strip().replace("R$", "").strip()
+        t = t.replace(".", "").replace(",", ".") if "," in t else t
+        try:
+            return float(t or 0)
+        except ValueError:
+            return 0.0
+
+    log = _linhas(ABA_LOG)
+    enviados = [l for l in log if str(l.get("status") or "").upper() == "ENVIADO"]
+
+    registrar(gc, c, "preparado (backfill)",
+              clientes=len(previa),
+              titulos=len(_linhas(ABA_TITULOS)),
+              bombas=len(_linhas(ABA_BOMBAS)),
+              valor_cobrado=round(sum(_n(l.get("total")) for l in previa), 2))
+    if enviados:
+        registrar(gc, c, "disparado (backfill)", enviados=len(enviados))
+    print(f"'{c.id_campanha}' registrada: {len(previa)} cliente(s), "
+          f"{len(enviados)} enviado(s).")
+
+
 def abrir_campanha(gc, id_campanha: str = None,
                    copia_padrao=("contato.financeiro@ctasmart.com.br",),
                    teto_diario: int = 450) -> "campanha_v2.Campanha":
@@ -949,6 +997,7 @@ def atualizar_painel(c, gc, bq=None, saldo_hoje=None, seriais_hoje=None):
               "não será derivada (ausência de dado não é bloqueio)")
 
     linhas = painel.montar(
+        etapa_anterior=painel.etapas_da_aba(p1, io),
         previa=previa,
         log=io.ler_aba(p1, ABA_LOG, obrigatoria=False),
         campanha=c,
