@@ -96,6 +96,26 @@ class Campanha:
             )
 
     @classmethod
+    def ensaio(cls, id_campanha: str, data_envio: date, data_limite: date, **kw):
+        """ENSAIO: resolve tudo e não envia nada. É o portão de produção.
+
+        Mandar 199 mensagens para a própria caixa a cada rodada é ruído que
+        ninguém lê — e o que se quer garantir é o COMPORTAMENTO, não receber os
+        e-mails. O ensaio percorre a fila inteira, aplica a idempotência de
+        produção, o teto e a regra de "sem destinatário", e devolve o relatório
+        do que sairia. Sem SMTP, sem senha, sem log.
+
+        Diferença única em relação à produção: `enviar_fn` não é chamada e o
+        log não é gravado. Todo o resto do caminho é o mesmo, porque é a mesma
+        fila e a mesma função de disparo.
+        """
+        kw.pop("redirecionar_para", None)
+        kw.pop("confirmo_producao", None)
+        kw.pop("dry_run", None)
+        return cls(id_campanha=id_campanha, data_envio=data_envio,
+                   data_limite=data_limite, dry_run=True, **kw)
+
+    @classmethod
     def teste(cls, id_campanha: str, data_envio: date, data_limite: date,
               para: str, **kw):
         """Atalho para a rodada de teste: nada sai para cliente."""
