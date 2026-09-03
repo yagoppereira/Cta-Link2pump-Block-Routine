@@ -62,7 +62,6 @@ ABA_TRIAGEM = "Triagem"
 ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
 ABA_EXCECOES = "Nunca_Notificar"
 ABA_CAMPANHAS = "Campanhas"
-ABA_CAMPANHAS = "Campanhas"
 ABA_EMAIL_VEND = "Email_Vendedores"
 ABA_CONTATOS = "Contatos_Emails"        # traz a coluna `vendedor` já resolvida
 
@@ -391,6 +390,127 @@ def criar_painel_campanhas(gc):
     ws.freeze(rows=4)
     print(f"'{ABA_PAINEL_CAMPANHAS}' criada: funil da régua, parâmetros, "
           f"resultado e histórico. O script não reescreve esta aba.")
+
+
+def abrir_campanha(gc, id_campanha: str = None,
+                   copia_padrao=("contato.financeiro@ctasmart.com.br",),
+                   teto_diario: int = 450) -> "campanha_v2.Campanha":
+    """REABRE uma campanha existente em vez de criar outra.
+
+    nova_campanha() sempre gera id novo, então uma sessão nova do Colab perdia
+    o vínculo com o que já foi congelado e enviado. Se o runtime cai no meio do
+    disparo, a campanha continua na planilha e o notebook não a alcança.
+
+    Sem id, reabre a mais recente com prévia congelada.
+
+    As datas NUNCA vêm de hoje: data_envio é a âncora dos encargos já
+    calculados, e recalcular com a data atual mudaria valores que o cliente já
+    recebeu por e-mail.
+    """
+    from datetime import date as _date
+
+    p1 = io.abrir(gc, ID_DESTINO)
+    previa = io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
+
+    congeladas = {str(l.get("id_campanha") or "").strip() for l in previa}
+    congeladas.discard("")
+    if not congeladas:
+        raise RuntimeError(f"Nenhuma campanha congelada em '{ABA_PREVIA}'. "
+                           f"Use nova_campanha() + preparar().")
+
+    if id_campanha is None:
+        id_campanha = sorted(congeladas)[-1]
+        if len(congeladas) > 1:
+            print(f"  congeladas: {', '.join(sorted(congeladas))}")
+    elif id_campanha not in congeladas:
+        raise RuntimeError(f"'{id_campanha}' não tem prévia congelada. "
+                           f"Disponíveis: {', '.join(sorted(congeladas))}")
+
+    # DUAS FONTES para as datas: a própria prévia primeiro (autossuficiente
+    # desde que o preparar grava as colunas), o registro depois. Antes só o
+    # registro servia, e apagá-lo trancava a campanha.
+    ultimo = next((l for l in reversed(previa)
+                   if str(l.get("id_campanha") or "").strip() == id_campanha
+                   and str(l.get("data_envio") or "").strip()), None)
+    origem = ABA_PREVIA
+    if ultimo is None:
+        reg = [l for l in io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
+               if str(l.get("id_campanha") or "").strip() == id_campanha
+               and str(l.get("data_envio") or "").strip()]
+        ultimo, origem = (reg[-1], ABA_CAMPANHAS) if reg else (None, None)
+    if ultimo is None:
+        raise RuntimeError(
+            f"'{id_campanha}' está congelada mas não tem datas nem em "
+            f"'{ABA_PREVIA}' nem em '{ABA_CAMPANHAS}'. Passe à mão:\n"
+            f"  c = campanha_v2.Campanha(id_campanha='{id_campanha}', "
+            f"data_envio=date(A,M,D), data_limite=date(A,M,D))\n"
+            f"data_envio tem de ser a do disparo original — é a âncora dos "
+            f"encargos que o cliente já recebeu.")
+
+    def _d(txt):
+        a, m, d = str(txt).strip()[:10].split("-")
+        return _date(int(a), int(m), int(d))
+
+    c = campanha_v2.Campanha(
+        id_campanha=id_campanha,
+        data_envio=_d(ultimo["data_envio"]),
+        data_limite=_d(ultimo["data_limite"]),
+        copia_padrao=tuple(copia_padrao), teto_diario=teto_diario,
+    )
+    n = sum(1 for l in previa
+            if str(l.get("id_campanha") or "").strip() == id_campanha)
+    print(f"{c.id_campanha} reaberta | envio {c.data_envio:%d/%m/%Y} | "
+          f"limite {c.data_limite:%d/%m/%Y} | {n} cliente(s) | "
+          f"datas de '{origem}'")
+    return c
+
+
+def backfill_registro(gc, c):
+    """Registra uma campanha já congelada, sem recongelar.
+
+    Rodar preparar() de novo recalcularia os encargos com a data de hoje,
+    mudando valores que o cliente já recebeu por e-mail. O backfill lê o que
+    está congelado e só registra.
+    """
+    p1 = io.abrir(gc, ID_DESTINO)
+
+    def _linhas(aba):
+        return [l for l in io.ler_aba(p1, aba, obrigatoria=False)
+                if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+
+    previa = _linhas(ABA_PREVIA)
+    if not previa:
+        raise RuntimeError(f"'{c.id_campanha}' não tem prévia congelada.")
+
+    ja = [l for l in io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
+          if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+    if ja:
+        print(f"'{c.id_campanha}' já tem {len(ja)} linha(s) no registro.")
+        return
+
+    def _n(v):
+        t = str(v or 0).strip().replace("R$", "").strip()
+        t = t.replace(".", "").replace(",", ".") if "," in t else t
+        try:
+            return float(t or 0)
+        except ValueError:
+            return 0.0
+
+    # Conta SÓ produção: filtrar apenas por status contava os e-mails de teste,
+    # que foram para a caixa do operador.
+    log = _linhas(ABA_LOG)
+    enviados = [l for l in log
+                if str(l.get("status") or "").upper() == "ENVIADO"
+                and str(l.get("modo") or "PRODUCAO").upper() == "PRODUCAO"]
+
+    registrar(gc, c, "preparado",
+              clientes=len(previa), titulos=len(_linhas(ABA_TITULOS)),
+              bombas=len(_linhas(ABA_BOMBAS)),
+              valor_cobrado=round(sum(_n(l.get("total")) for l in previa), 2))
+    if enviados:
+        registrar(gc, c, "disparado", enviados=len(enviados), falhas=0)
+    print(f"'{c.id_campanha}': {len(previa)} cliente(s), "
+          f"{len(enviados)} enviado(s) em produção.")
 
 
 def registrar(gc, c, fase: str, **metricas):
@@ -794,7 +914,15 @@ def preparar(c, gc, bq) -> dict:
         triagem.append({"id_campanha": c.id_campanha, "codigo_cliente": str(bruto),
                         "nome_cliente": "", "caso": "rejeitado na lista", "detalhe": motivo})
 
-    io.escrever_aba(p1, ABA_PREVIA, pd.DataFrame(previa))
+    # DATAS NA PRÓPRIA PRÉVIA. Elas viviam só na aba Campanhas, e apagar
+    # aquela aba deixava a campanha inalcançável: o abrir_campanha não tinha
+    # de onde tirar data_envio e data_limite, e sem data_envio não dá para
+    # reabrir — ela é a âncora dos encargos que o cliente já recebeu.
+    # Duas colunas fazem o snapshot bastar por si.
+    df_previa = pd.DataFrame(previa)
+    df_previa["data_envio"] = f"{c.data_envio:%Y-%m-%d}"
+    df_previa["data_limite"] = f"{c.data_limite:%Y-%m-%d}"
+    io.escrever_aba(p1, ABA_PREVIA, df_previa)
     io.escrever_aba(p1, ABA_TITULOS, df_tit)
     io.escrever_aba(p1, ABA_BOMBAS, df_bmb)
     io.escrever_aba(p1, ABA_TRIAGEM, pd.DataFrame(
