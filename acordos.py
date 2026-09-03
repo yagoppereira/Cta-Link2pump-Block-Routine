@@ -108,7 +108,16 @@ def _doc(valor) -> str | None:
 @dataclass
 class Acordos:
     por_cliente: dict = field(default_factory=dict)      # codigo -> status
-    titulos_protegidos: set = field(default_factory=set)  # (codigo, doc) sob acordo VIGENTE
+    # TODOS os títulos que aparecem no acordo do cliente, qualquer que seja o
+    # status da linha. Antes eu guardava só as linhas "Em Dia", e isso estava
+    # errado: parcela já QUITADA do mesmo acordo fazia o cliente parecer ter
+    # título fora dele. A Paranapuan tem 8 títulos vencidos, 7 em dia e 1
+    # quitado, e entrou na régua por causa do quitado.
+    #
+    # O acordo cobre um CONJUNTO de títulos. Linha quitada é progresso dentro
+    # do acordo, não título descoberto. Quem decide se o conjunto protege é o
+    # status agregado do cliente (ver `protege`).
+    titulos_do_acordo: dict = field(default_factory=dict)  # codigo -> {doc, ...}
     indefinidos: dict = field(default_factory=dict)       # codigo -> motivo
     linhas_por_cliente: dict = field(default_factory=dict)
     sem_codigo: int = 0
@@ -117,9 +126,16 @@ class Acordos:
         return self.por_cliente.get(codigo, SEM_ACORDO)
 
     def protege(self, codigo: str, doc) -> bool:
-        """Este título específico está coberto por acordo vigente?"""
+        """Este título está coberto por um acordo VIGENTE do cliente?
+
+        Duas condições, separadas de propósito: o acordo do cliente tem de
+        estar vigente (PAGANDO) E o título tem de constar nele. Uma parcela
+        quitada continua constando, porque quitar parcela é cumprir o acordo.
+        """
+        if self.status(codigo) != PAGANDO:
+            return False
         d = _doc(doc)
-        return bool(d) and (codigo, d) in self.titulos_protegidos
+        return bool(d) and d in self.titulos_do_acordo.get(codigo, set())
 
     def resumo(self) -> str:
         cont = {}
@@ -133,7 +149,10 @@ class Acordos:
             L.append("   INDEFINIDO segura o cliente — confira estes:")
             for c, m in sorted(self.indefinidos.items())[:8]:
                 L.append(f"      {c}: {m}")
-        L.append(f"   {len(self.titulos_protegidos)} título(s) sob acordo vigente")
+        vigentes = sum(len(v) for c, v in self.titulos_do_acordo.items()
+                       if self.status(c) == PAGANDO)
+        L.append(f"   {vigentes} título(s) sob acordo vigente, "
+                 f"{sum(len(v) for v in self.titulos_do_acordo.values())} no total")
         if self.sem_codigo:
             L.append(f"   {self.sem_codigo} linha(s) sem código extraível do campo EMPRESA")
         return "\n".join(L)
@@ -161,12 +180,12 @@ def carregar(gc, io_sheets, spreadsheet_id: str = ACORDOS_SPREADSHEET_ID,
         st = _status_da_linha(l.get("status_acordo") or l.get("STATUS ACORDO"))
         a.linhas_por_cliente.setdefault(codigo, []).append(st)
 
-        # Só acordo VIGENTE protege. Quitado encerrou; quebrado perdeu a
-        # proteção justamente por ter sido descumprido.
-        if st == PAGANDO:
-            d = _doc(l.get("doc") or l.get("DOC"))
-            if d:
-                a.titulos_protegidos.add((codigo, d))
+        # Registra o título INDEPENDENTE do status da linha. Se o acordo do
+        # cliente estiver vigente, ele cobre o conjunto todo — inclusive as
+        # parcelas que ele já pagou.
+        d = _doc(l.get("doc") or l.get("DOC"))
+        if d:
+            a.titulos_do_acordo.setdefault(codigo, set()).add(d)
 
         # Não classificável = segura. Cobre o caso conhecido (data em branco
         # para firmar acordo novo por cima) e qualquer estado futuro, sem
@@ -217,7 +236,7 @@ def aplicar(df, acordos: Acordos, docs_por_cliente: dict | None = None):
             return False
         if not docs_por_cliente:
             return True                      # sem os DOCs, protege o cliente todo
-        docs = docs_por_cliente.get(codigo) or []
+        docs = [d for d in (docs_por_cliente.get(codigo) or []) if str(d).strip()]
         return bool(docs) and all(acordos.protege(codigo, d) for d in docs)
 
     df["coberto_por_acordo"] = df.codigo.map(_coberto)
