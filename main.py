@@ -392,6 +392,80 @@ def criar_painel_campanhas(gc):
           f"resultado e histórico. O script não reescreve esta aba.")
 
 
+def migrar_datas_previa(gc, dry_run: bool = True):
+    """Acrescenta data_envio/data_limite às campanhas JÁ congeladas.
+
+    Rodar preparar() de novo não serve: ele recalcularia os encargos com a data
+    de hoje, mudando valores que o cliente já recebeu por e-mail. O snapshot
+    deixaria de descrever o que foi cobrado.
+
+    Esta função não toca em nenhum valor — só acrescenta duas colunas, lendo
+    as datas do registro. Idempotente: campanha que já tem as colunas é pulada.
+
+    dry_run=True (padrão) mostra o que faria sem escrever. É snapshot de
+    campanha enviada; vale olhar antes.
+    """
+    import pandas as pd
+
+    p1 = io.abrir(gc, ID_DESTINO)
+    linhas = io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
+    if not linhas:
+        print(f"'{ABA_PREVIA}' vazia; nada a migrar."); return
+
+    datas = {}
+    for l in io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False):
+        cid = str(l.get("id_campanha") or "").strip()
+        env, lim = str(l.get("data_envio") or "").strip(), str(l.get("data_limite") or "").strip()
+        if cid and env and lim:
+            datas[cid] = (env[:10], lim[:10])
+
+    # Trabalha numa CÓPIA. A primeira versão mutava as linhas lidas antes de
+    # decidir não escrever, então rodar em dry_run e rodar de novo dava
+    # resultados diferentes — um dry_run que muda estado não é dry_run.
+    novas = [dict(l) for l in linhas]
+
+    faltam, preenchidas, sem_data = 0, 0, set()
+    for l in novas:
+        cid = str(l.get("id_campanha") or "").strip()
+        if str(l.get("data_envio") or "").strip():
+            preenchidas += 1
+            continue
+        if cid in datas:
+            l["data_envio"], l["data_limite"] = datas[cid]
+            faltam += 1
+        else:
+            # String vazia, não None: None vira "None" no Sheets.
+            l.setdefault("data_envio", "")
+            l.setdefault("data_limite", "")
+            sem_data.add(cid)
+
+    print(f"{len(linhas)} linha(s) em '{ABA_PREVIA}': "
+          f"{preenchidas} já tinham data, {faltam} preenchida(s).")
+    if sem_data:
+        print(f"  SEM data no registro, ficam como estão: "
+              f"{', '.join(sorted(sem_data))}")
+        print(f"  (para essas, registre a campanha antes com backfill_registro)")
+
+    if not faltam:
+        print("Nada a escrever."); return
+
+    if dry_run:
+        print("\ndry_run=True: NÃO escrevi. Amostra do que ficaria:")
+        for l in novas[:3]:
+            print(f"   {l.get('id_campanha')} {l.get('codigo_cliente')} "
+                  f"envio={l.get('data_envio')} limite={l.get('data_limite')}")
+        print("\nPara aplicar: migrar_datas_previa(gc, dry_run=False)")
+        return
+
+    # Reescreve a aba INTEIRA, todas as campanhas. escrever_aba limpa antes,
+    # então o DataFrame precisa conter tudo que estava lá — por isso partimos
+    # das linhas lidas e só acrescentamos colunas.
+    df = pd.DataFrame(novas)
+    io.escrever_aba(p1, ABA_PREVIA, df)
+    print(f"'{ABA_PREVIA}' regravada: {len(df)} linha(s), "
+          f"{len(df.columns)} coluna(s).")
+
+
 def abrir_campanha(gc, id_campanha: str = None,
                    copia_padrao=("contato.financeiro@ctasmart.com.br",),
                    teto_diario: int = 450) -> "campanha_v2.Campanha":
