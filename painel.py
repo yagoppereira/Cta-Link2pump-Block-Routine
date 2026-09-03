@@ -64,7 +64,8 @@ class Estado:
 def calcular_etapa(*, avisado_em=None, falha_envio: str = "",
                    prazo: date = None, hoje: date = None,
                    saldo_no_aviso: float = 0.0, saldo_hoje: float = None,
-                   seriais_no_aviso: set = None, seriais_hoje: set = None) -> Estado:
+                   seriais_no_aviso: set = None, seriais_hoje: set = None,
+                   etapa_anterior: str = "") -> Estado:
     """Deriva a etapa. Ordem de precedência deliberada: primeiro o que é fato
     consumado (bloqueado, pagou), depois o que é pendência."""
     hoje = hoje or date.today()
@@ -88,6 +89,15 @@ def calcular_etapa(*, avisado_em=None, falha_envio: str = "",
         if sumiram:
             return Estado(BLOQUEADO,
                           f"{len(sumiram)} de {len(seriais_no_aviso)} equipamento(s)")
+        # DESBLOQUEADO precisa de MEMÓRIA: "voltou" só existe em relação a
+        # "tinha sumido". O painel é recalculado do zero a cada execução, então
+        # sem a etapa da rodada anterior este estado era inalcançável — estava
+        # declarado, tinha cor e lugar na ordem, e nunca era produzido.
+        # `etapa_anterior` vem da própria aba Painel_Bloqueio, que assim passa
+        # a ser entrada além de saída.
+        if etapa_anterior in (BLOQUEADO, DESBLOQUEADO):
+            return Estado(DESBLOQUEADO,
+                          f"{len(seriais_no_aviso)} equipamento(s) de volta")
 
     if saldo_hoje is not None:
         if saldo_hoje <= 0:
@@ -131,8 +141,22 @@ def _numero(valor) -> float:
         return 0.0
 
 
+def etapas_da_aba(planilha, io_sheets, nome: str = "Painel_Bloqueio") -> dict:
+    """{codigo_cliente: etapa} da última execução do painel.
+
+    É o que dá memória ao painel: sem isso, DESBLOQUEADO é inalcançável,
+    porque "voltou" só faz sentido contra "tinha sumido".
+    """
+    return {
+        str(l.get("codigo_cliente") or "").strip(): str(l.get("etapa") or "").strip()
+        for l in io_sheets.ler_aba(planilha, nome, obrigatoria=False)
+        if str(l.get("codigo_cliente") or "").strip()
+    }
+
+
 def montar(previa: list, log: list, campanha,
            saldo_hoje: dict = None, seriais_hoje: set = None,
+           etapa_anterior: dict = None,
            bombas_snapshot: list = None, hoje: date = None) -> list:
     """Uma linha por cliente da campanha, com a etapa calculada.
 
@@ -176,6 +200,7 @@ def montar(previa: list, log: list, campanha,
             saldo_hoje=(saldo_hoje or {}).get(cod) if saldo_hoje is not None else None,
             seriais_no_aviso=seriais_por_cliente.get(cod, set()),
             seriais_hoje=seriais_hoje,
+            etapa_anterior=(etapa_anterior or {}).get(cod, ""),
         )
 
         linhas.append({
