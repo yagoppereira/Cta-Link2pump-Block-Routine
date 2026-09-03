@@ -60,6 +60,8 @@ ABA_LOG = "Campanha_Log"
 ABA_TRIAGEM = "Triagem"
 ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
 ABA_EXCECOES = "Nunca_Notificar"
+ABA_CAMPANHAS = "Campanhas"
+ABA_CAMPANHAS = "Campanhas"
 ABA_EMAIL_VEND = "Email_Vendedores"
 ABA_CONTATOS = "Contatos_Emails"        # traz a coluna `vendedor` já resolvida
 
@@ -170,6 +172,180 @@ def ingerir_lista(gc, lista_recebida: list):
     print(ing.resumo())
     ent.escrever_campanha_input(p1, ing, io, ABA_INPUT)
     return ing
+
+
+def _proximo_id(campanhas: list, quando) -> str:
+    """2026-09-A, depois -B, -C. Deriva do que já existe no registro.
+
+    Letra e não número porque campanha não é sequencial no mês: se você rodar
+    duas em setembro, a segunda é a B, e fica óbvio na leitura do log qual veio
+    antes sem precisar comparar datas.
+    """
+    prefixo = f"{quando:%Y-%m}"
+    usadas = {
+        str(l.get("id_campanha") or "")[len(prefixo) + 1:]
+        for l in campanhas
+        if str(l.get("id_campanha") or "").startswith(prefixo + "-")
+    }
+    for letra in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if letra not in usadas:
+            return f"{prefixo}-{letra}"
+    raise RuntimeError(f"26 campanhas em {prefixo}? Confira o registro.")
+
+
+def _dia_util(d, bq=None):
+    """Empurra a data para o próximo dia útil.
+
+    Prazo de pagamento caindo no fim de semana é prazo que o cliente não tem —
+    o banco não compensa. Feriado é o mesmo problema e não dá para deduzir do
+    dia da semana: 07/09 e 12/10 caem em dia útil no calendário e não existem
+    para pagamento.
+
+    Com `bq`, usa silver.calendario_dias_uteis — o MESMO calendário que a
+    titulos_cigam usa para a carência de inadimplência. Isso importa: se o
+    e-mail concede prazo até um dia que o DW já conta como atraso, as duas
+    metades do sistema discordam sobre o mesmo dia.
+
+    Sem `bq`, pula só fim de semana e AVISA que feriado não foi checado, em vez
+    de dar a impressão de que foi.
+    """
+    from datetime import timedelta
+
+    if bq is not None:
+        linhas = list(bq.query(f"""
+            SELECT eh_dia_util, proximo_dia_util
+            FROM `{PROJECT_ID}.silver.calendario_dias_uteis`
+            WHERE data = DATE '{d:%Y-%m-%d}'
+        """).result())
+        if not linhas:
+            print(f"  {d:%d/%m/%Y} fora do calendário do DW; usando só fim de semana")
+        elif not linhas[0].eh_dia_util:
+            novo = linhas[0].proximo_dia_util
+            print(f"  {d:%d/%m} não é dia útil (fim de semana ou feriado) "
+                  f"-> {novo:%d/%m}")
+            return novo
+        else:
+            return d
+
+    original = d
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    if d != original:
+        print(f"  {original:%d/%m} caía em fim de semana -> {d:%d/%m}")
+    print("  (sem `bq`: FERIADO não foi verificado)")
+    return d
+
+
+def nova_campanha(gc, bq=None, prazo_dias: int = 13, data_envio=None,
+                  copia_padrao=("contato.financeiro@ctasmart.com.br",),
+                  teto_diario: int = 450) -> "campanha_v2.Campanha":
+    """Monta a campanha do dia sem você digitar id nem datas.
+
+        data_envio  = hoje (é o dia em que você roda; é também a âncora do
+                      cálculo de encargos, então inventar outra data produziria
+                      juros que não correspondem à posição informada)
+        id_campanha = derivado do registro: 2026-09-A, -B, -C...
+        data_limite = data_envio + prazo_dias, empurrado para dia útil
+
+    Imprime o que decidiu. Se algo não fizer sentido, monte a Campanha à mão —
+    o construtor continua aberto.
+    """
+    from datetime import date, timedelta
+
+    envio_em = data_envio or date.today()
+    p1 = io.abrir(gc, ID_DESTINO)
+    registro = io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
+
+    id_campanha = _proximo_id(registro, envio_em)
+    limite = _dia_util(envio_em + timedelta(days=prazo_dias), bq)
+
+    c = campanha_v2.Campanha(
+        id_campanha=id_campanha,
+        data_envio=envio_em,
+        data_limite=limite,
+        copia_padrao=tuple(copia_padrao),
+        teto_diario=teto_diario,
+    )
+    print(f"{id_campanha} | envio {envio_em:%d/%m/%Y} | "
+          f"prazo até {limite:%d/%m/%Y} ({c.dias_de_prazo} dias)")
+    if limite != envio_em + timedelta(days=prazo_dias):
+        print(f"  (prazo empurrado para dia útil)")
+    if registro:
+        ult = registro[-1]
+        print(f"  anterior: {ult.get('id_campanha')} em "
+              f"{ult.get('data_envio')} — {ult.get('clientes')} cliente(s)")
+    return c
+
+
+ABA_PAINEL_CAMPANHAS = "Painel_Campanhas"
+
+
+def criar_painel_campanhas(gc):
+    """Cria, UMA VEZ, a aba de leitura com fórmulas sobre o registro.
+
+    Por que uma aba separada e não fórmulas na própria `Campanhas`: o
+    escrever_aba limpa conteúdo E formatação da aba que escreve — foi o que
+    apagou formato e fez R$ 120,38 virar 1900-04-29. Fórmula colocada na
+    `Campanhas` seria apagada no próximo append.
+
+    Então a divisão é: `Campanhas` é append-only, escrita só pelo script, e
+    esta aba lê de lá. O script nunca toca aqui, e você pode acrescentar
+    coluna, gráfico e filtro sem medo de perder no próximo disparo.
+
+    Se a aba já existe, NÃO mexe — suas alterações ficam.
+    """
+    p1 = io.abrir(gc, ID_DESTINO)
+    try:
+        p1.worksheet(ABA_PAINEL_CAMPANHAS)
+        print(f"'{ABA_PAINEL_CAMPANHAS}' já existe; não foi alterada.")
+        return
+    except Exception:
+        pass
+
+    ws = p1.add_worksheet(title=ABA_PAINEL_CAMPANHAS, rows="200", cols="26")
+
+    # A fórmula NÃO escolhe colunas por posição. A ordem do cabeçalho da aba
+    # Campanhas é definida no primeiro append e eu não a conheço aqui —
+    # referenciar Col5, Col6 seria adivinhar e sair errado em silêncio.
+    # `select *` traz tudo com o cabeçalho, mais recente primeiro, e você
+    # esconde, reordena ou soma o que quiser sem o script atropelar.
+    ws.update(
+        [["Controle de campanhas"],
+         ["Lê a aba Campanhas (append-only, escrita pelo script). "
+          "Esta aba é sua: o script não reescreve nada aqui."],
+         [],
+         [f'=IFERROR(QUERY({ABA_CAMPANHAS}!A:Z;'
+          f'"select * order by Col1 desc";1);'
+          f'"(nenhuma campanha registrada ainda — rode preparar())")']],
+        "A1", value_input_option="USER_ENTERED")
+    ws.format("A1", {"textFormat": {"bold": True, "fontSize": 13}})
+    ws.format("A2", {"textFormat": {"fontSize": 9, "foregroundColor":
+                                    {"red": .5, "green": .5, "blue": .5}}})
+    ws.freeze(rows=4)
+    print(f"'{ABA_PAINEL_CAMPANHAS}' criada. Ajuste como quiser — "
+          f"o script não reescreve esta aba.")
+
+
+def registrar(gc, c, fase: str, **metricas):
+    """Uma linha por campanha no registro. É o controle que faltava: o
+    Campanha_Log é por mensagem e não responde 'quantas campanhas já rodaram,
+    com que prazo, quanto valor'."""
+    from datetime import datetime
+    p1 = io.abrir(gc, ID_DESTINO)
+    io.append_log(p1, ABA_CAMPANHAS, {
+        "id_campanha": c.id_campanha,
+        "fase": fase,
+        "modo": c.modo,
+        "data_envio": f"{c.data_envio:%Y-%m-%d}",
+        "data_limite": f"{c.data_limite:%Y-%m-%d}",
+        "dias_prazo": c.dias_de_prazo,
+        "registrado_em": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        **metricas,
+    })
+
+
+
+
 
 
 def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
@@ -431,6 +607,10 @@ def preparar(c, gc, bq) -> dict:
     print(f"\nCONGELADO: {len(previa)} cliente(s), {len(df_tit)} título(s), "
           f"{len(df_bmb)} bomba(s), R$ {total:,.2f}.")
     print(f"{len(triagem)} caso(s) em {ABA_TRIAGEM}. Confira antes de disparar.")
+
+    registrar(gc, c, "preparado",
+              clientes=len(previa), titulos=len(df_tit), bombas=len(df_bmb),
+              valor_cobrado=round(total, 2), casos_triagem=len(triagem))
     return {"previa": previa, "triagem": triagem}
 
 
@@ -523,6 +703,10 @@ def disparar(c, gc, enviar_fn=None) -> envio.Resultado:
                                                  modo=c.modo),
     )
     print(r.resumo())
+    registrar(gc, c, "disparado",
+              enviados=len(r.enviados), pulados=len(r.pulados),
+              falhas=len(r.falhas), pendentes=len(r.pendentes),
+              destinatarios=r.destinatarios_usados)
     return r
 
 
@@ -563,6 +747,13 @@ def reconciliar(c, gc, bq) -> dict:
         for r in parcial:
             print(f"   {r['codigo_cliente']} {r['nome_cliente'][:30]}: "
                   f"{r['saldo_no_aviso']:.2f} -> {r['saldo_hoje']:.2f}")
+    registrar(gc, c, "reconciliado",
+              quitou=len(quitou), pagou_parcial=len(parcial),
+              mantem_bloqueio=len(mantem),
+              valor_recuperado=round(
+                  sum(float(r.get("saldo_no_aviso") or 0)
+                      - float(r.get("saldo_hoje") or 0)
+                      for r in quitou + parcial), 2))
     return {"quitou": quitou, "parcial": parcial, "mantem": mantem}
 
 
