@@ -481,10 +481,14 @@ def registrar(gc, c, fase: str, **metricas):
     com que prazo, quanto valor'."""
     from datetime import datetime
     p1 = io.abrir(gc, ID_DESTINO)
+    # `modo` só descreve ENVIO. Na fase "preparado" nada é enviado, e gravar
+    # DRY_RUN ali sugeria que a campanha inteira foi um ensaio — foi o que
+    # apareceu no registro da 2026-09-B, que teve disparo real de produção.
+    modo = c.modo if fase.startswith("disparado") else ""
     io.append_log(p1, ABA_CAMPANHAS, {
         "id_campanha": c.id_campanha,
         "fase": fase,
-        "modo": c.modo,
+        "modo": modo,
         "data_envio": f"{c.data_envio:%Y-%m-%d}",
         "data_limite": f"{c.data_limite:%Y-%m-%d}",
         "dias_prazo": c.dias_de_prazo,
