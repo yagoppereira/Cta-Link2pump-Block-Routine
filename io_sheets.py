@@ -260,7 +260,7 @@ def append_log(planilha, nome: str, linha: dict):
 
 
 def chaves_ja_enviadas(planilha, nome_log: str, id_campanha: str,
-                       modo: str = "PRODUCAO") -> set:
+                       modo: str = "PRODUCAO", reenviar: bool = False) -> set:
     """Códigos que já receberam e-mail NESTA campanha, NESTE modo.
 
     O filtro por modo não é detalhe. Sem ele, um envio de teste marcava os
@@ -268,11 +268,16 @@ def chaves_ja_enviadas(planilha, nome_log: str, id_campanha: str,
     você acharia que mandou e não teria mandado. O log é o mesmo, mas as duas
     contagens são independentes.
 
-    Em modo TESTE devolve conjunto VAZIO de propósito: o teste existe para ser
-    repetido enquanto o template muda, e mandar duas vezes para a própria caixa
-    não tem custo. Idempotência protege o CLIENTE, não a sua caixa de entrada.
+    Em TESTE o log de teste É consultado, para a fila PROGREDIR: com teto
+    diário, a execução seguinte continua de onde parou. Ignorar o log fazia o
+    teste remandar eternamente os mesmos primeiros clientes — foi assim que
+    três e-mails saíram e os outros quarenta nunca saíram.
+
+    Para remandar tudo (conferir renderização depois de mexer no template),
+    passe reenviar=True na Campanha. Produção nunca é afetada: os dois logs
+    são independentes por modo.
     """
-    if modo == "TESTE":
+    if modo == "TESTE" and reenviar:
         return set()
 
     return {
