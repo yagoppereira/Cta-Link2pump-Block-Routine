@@ -58,6 +58,15 @@ class Campanha:
     redirecionar_para: str | None = None
     confirmo_producao: bool = False
 
+    # Em modo TESTE, consultar o log de teste (padrão) faz a fila PROGREDIR:
+    # com teto diário, a execução seguinte continua de onde parou em vez de
+    # remandar os mesmos primeiros para sempre.
+    #
+    # reenviar=True ignora o log de teste e manda tudo de novo — serve para
+    # reconferir renderização depois de mexer no template. Não afeta produção
+    # em nenhum dos casos: os dois logs são independentes.
+    reenviar: bool = False
+
     def __post_init__(self):
         if self.data_limite < self.data_envio:
             raise ValueError(
