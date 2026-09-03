@@ -381,34 +381,56 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     # alguém esquece, e o esquecimento manda aviso de bloqueio para a Ipiranga.
     #
     # Aba Nunca_Notificar: chave | motivo
-    #   código CIGAM   6 dígitos   um cadastro
-    #   raiz de CNPJ   8 dígitos   o grupo todo (Aço Verde tem 4 cadastros,
-    #                              Rio Itá 4, Translovato 5)
-    #   cliente_id     9+ dígitos  o LOGIN do app — todos os cadastros que
-    #                              pagam por bomba daquele sistema
+    #   000337           código CIGAM   -> um cadastro
+    #   17185786         raiz de CNPJ   -> o grupo todo
+    #   17185786000161   CNPJ completo  -> idem, usa a raiz
+    #   ID(974321)       cliente_id     -> todos os pagantes do sistema
     #
-    # O cliente_id existe para o caso que o código e a raiz não resolvem:
-    # login grande demais para bloquear. Um sistema pode ter bombas pagas por
-    # vários CNPJs sem relação entre si (a Deep paga por bomba do login 790099,
-    # que é da Concórdia), então excluir por CNPJ não protege o sistema e
-    # excluir o sistema não se expressa por CNPJ.
+    # O PREFIXO ID() É OBRIGATÓRIO e não é firula. Deduzir o tipo pelo número
+    # de dígitos não funciona: existe cliente_id 974321 (6 dígitos, igual a
+    # código CIGAM) e cliente_id 69288523 (8, igual a raiz de CNPJ). Sem o
+    # marcador, os dois seriam lidos como outra coisa e a exclusão falharia
+    # em silêncio — que é o pior modo de falhar numa lista de proteção.
+    #
+    # O cliente_id existe porque um sistema pode ter bombas pagas por CNPJs
+    # sem relação entre si: o 53412440 tem 35 pagantes. Excluir por CNPJ não
+    # protege o sistema, e proteger o sistema não se expressa por CNPJ.
     excecoes = io.ler_aba(p1, ABA_EXCECOES, obrigatoria=False)
     bloq_cadastro, bloq_raiz, bloq_sistema, motivo_de = set(), set(), set(), {}
+    ignoradas = []
     for l in excecoes:
-        chave = re.sub(r"\D", "", str(l.get("chave") or l.get("codigo") or ""))
-        if not chave:
+        bruto = str(l.get("chave") or l.get("codigo") or "").strip()
+        if not bruto:
             continue
         motivo = str(l.get("motivo") or "").strip() or "sem motivo informado"
-        if len(chave) <= 6:
-            k = chave.zfill(6); bloq_cadastro.add(k)
-        elif len(chave) == 8:
-            k = chave; bloq_raiz.add(k)
-        elif len(chave) in (11, 14):
-            # CNPJ ou CPF completo colado: usa a raiz.
-            k = chave[:8]; bloq_raiz.add(k)
+
+        m = re.fullmatch(r"(?i)\s*id\s*\(?\s*(\d+)\s*\)?\s*", bruto)
+        if m:
+            k = m.group(1)
+            bloq_sistema.add(k)
         else:
-            k = chave; bloq_sistema.add(k)      # cliente_id do app
+            digitos = re.sub(r"\D", "", bruto)
+            if not digitos:
+                ignoradas.append((bruto, "sem dígitos"))
+                continue
+            if len(digitos) <= 6:
+                k = digitos.zfill(6); bloq_cadastro.add(k)
+            elif len(digitos) in (8, 11, 14):
+                k = digitos[:8]; bloq_raiz.add(k)
+            else:
+                # Não inventa interpretação: 7, 9 ou 12 dígitos sem prefixo não
+                # é código, nem raiz, nem sistema declarado. Avisa e ignora.
+                ignoradas.append(
+                    (bruto, f"{len(digitos)} dígitos — use 6 (código), "
+                            f"8/11/14 (CNPJ) ou ID(...) para cliente_id"))
+                continue
         motivo_de[k] = motivo
+
+    if ignoradas:
+        print(f"  {len(ignoradas)} chave(s) IGNORADA(S) em '{ABA_EXCECOES}' "
+              f"— NÃO excluíram ninguém:")
+        for bruto, por_que in ignoradas:
+            print(f"     {bruto!r}: {por_que}")
 
     # cliente_id -> cadastros que pagam por bomba daquele sistema
     cadastros_do_sistema = {}
