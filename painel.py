@@ -172,6 +172,15 @@ def montar(previa: list, log: list, campanha,
     for l in log:
         if l.get("id_campanha") != campanha.id_campanha:
             continue
+        # SÓ PRODUÇÃO. Sem este filtro, um cliente que recebeu apenas o e-mail
+        # de teste — que foi para a caixa do operador — aparecia como AVISADO,
+        # com prazo correndo, sem nunca ter sido notificado. E como a última
+        # linha vence, um teste rodado depois da produção sobrescreveria o
+        # registro do envio real.
+        # Linha sem `modo` é anterior à separação: assume produção, que é o
+        # lado seguro para "este cliente foi avisado?".
+        if str(l.get("modo") or "PRODUCAO").upper() != "PRODUCAO":
+            continue
         cod = l.get("codigo_cliente")
         atual = envio_por_cliente.get(cod)
         # Última linha do log vence: uma tentativa que falhou e depois deu
