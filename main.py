@@ -188,10 +188,22 @@ def _proximo_id(campanhas: list, quando) -> str:
         for l in campanhas
         if str(l.get("id_campanha") or "").startswith(prefixo + "-")
     }
-    for letra in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        if letra not in usadas:
-            return f"{prefixo}-{letra}"
-    raise RuntimeError(f"26 campanhas em {prefixo}? Confira o registro.")
+    letras = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    # AVANÇA depois da maior letra usada, não preenche lacuna. Preenchendo,
+    # existindo só a -B a campanha nova nasceria -A: letra menor que uma
+    # campanha anterior, e nome que pode ter sido usado e depois limpo do log.
+    # Uma sequência que só cresce nunca reaproveita nome.
+    # len == 1 é necessário: `"" in "ABC"` é True em Python, então um
+    # id malformado tipo "2026-09-" (sufixo vazio) contava como letra A e a
+    # próxima nascia B.
+    validas = [l for l in usadas if len(l) == 1 and l in letras]
+    if not validas:
+        return f"{prefixo}-A"
+    proxima = max(letras.index(l) for l in validas) + 1
+    if proxima >= len(letras):
+        raise RuntimeError(f"26 campanhas em {prefixo}? Confira o registro.")
+    return f"{prefixo}-{letras[proxima]}"
 
 
 def _dia_util(d, bq=None):
@@ -255,7 +267,14 @@ def nova_campanha(gc, bq=None, prazo_dias: int = 13, data_envio=None,
 
     envio_em = data_envio or date.today()
     p1 = io.abrir(gc, ID_DESTINO)
+
+    # Três fontes de id já usado, não só o registro. Limpar o Campanha_Log
+    # fazia o id voltar para -A enquanto a prévia congelada era -B: a campanha
+    # nova nascia com o nome de outra e o painel não achava nada.
     registro = io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
+    registro = (list(registro)
+                + list(io.ler_aba(p1, ABA_PREVIA, obrigatoria=False))
+                + list(io.ler_aba(p1, ABA_LOG, obrigatoria=False)))
 
     id_campanha = _proximo_id(registro, envio_em)
     limite = _dia_util(envio_em + timedelta(days=prazo_dias), bq)
@@ -325,6 +344,76 @@ def criar_painel_campanhas(gc):
     ws.freeze(rows=4)
     print(f"'{ABA_PAINEL_CAMPANHAS}' criada. Ajuste como quiser — "
           f"o script não reescreve esta aba.")
+
+
+def abrir_campanha(gc, id_campanha: str = None,
+                   copia_padrao=("contato.financeiro@ctasmart.com.br",),
+                   teto_diario: int = 450) -> "campanha_v2.Campanha":
+    """REABRE uma campanha existente em vez de criar outra.
+
+    Faltava isto: nova_campanha() sempre gera id novo, então uma sessão nova do
+    Colab perdia o vínculo com o que já foi congelado e enviado. Se o runtime
+    cai no meio de um disparo, ou se o log é limpo, a campanha continua na
+    planilha e o notebook não a alcança mais.
+
+    Sem id, reabre a MAIS RECENTE que tem prévia congelada — que é o que se
+    quer em 99% dos casos: continuar de onde parou.
+
+    As datas vêm do registro, nunca de hoje: `data_envio` é a âncora dos
+    encargos já calculados, e recalcular com a data de hoje mudaria valores que
+    o cliente já recebeu por e-mail.
+    """
+    p1 = io.abrir(gc, ID_DESTINO)
+
+    congeladas = {str(l.get("id_campanha") or "").strip()
+                  for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)}
+    congeladas.discard("")
+    if not congeladas:
+        raise RuntimeError(
+            f"Nenhuma campanha congelada em '{ABA_PREVIA}'. "
+            f"Use nova_campanha() + preparar() para começar uma.")
+
+    if id_campanha is None:
+        id_campanha = sorted(congeladas)[-1]
+        if len(congeladas) > 1:
+            print(f"  {len(congeladas)} campanha(s) congelada(s): "
+                  f"{', '.join(sorted(congeladas))}")
+    elif id_campanha not in congeladas:
+        raise RuntimeError(
+            f"'{id_campanha}' não tem prévia congelada. "
+            f"Disponíveis: {', '.join(sorted(congeladas))}")
+
+    # Datas do registro. Se o registro não tiver (campanha anterior ao
+    # registrar()), pede explicitamente em vez de inventar.
+    reg = [l for l in io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
+           if str(l.get("id_campanha") or "").strip() == id_campanha
+           and str(l.get("data_envio") or "").strip()]
+    if not reg:
+        raise RuntimeError(
+            f"'{id_campanha}' está congelada mas não tem datas em "
+            f"'{ABA_CAMPANHAS}'. Passe à mão:\n"
+            f"  c = campanha_v2.Campanha(id_campanha='{id_campanha}', "
+            f"data_envio=date(A,M,D), data_limite=date(A,M,D))\n"
+            f"A data_envio tem de ser a do disparo original — ela é a âncora "
+            f"dos encargos que o cliente já recebeu.")
+
+    from datetime import date as _date
+    ultimo = reg[-1]
+    def _d(txt):
+        a, m, d = str(txt).strip()[:10].split("-")
+        return _date(int(a), int(m), int(d))
+
+    c = campanha_v2.Campanha(
+        id_campanha=id_campanha,
+        data_envio=_d(ultimo["data_envio"]),
+        data_limite=_d(ultimo["data_limite"]),
+        copia_padrao=tuple(copia_padrao), teto_diario=teto_diario,
+    )
+    n = sum(1 for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
+            if str(l.get("id_campanha") or "").strip() == id_campanha)
+    print(f"{c.id_campanha} reaberta | envio {c.data_envio:%d/%m/%Y} | "
+          f"limite {c.data_limite:%d/%m/%Y} | {n} cliente(s) congelado(s)")
+    return c
 
 
 def registrar(gc, c, fase: str, **metricas):
