@@ -69,7 +69,6 @@ def calcular_etapa(*, avisado_em=None, falha_envio: str = "",
     consumado (bloqueado, pagou), depois o que é pendência."""
     hoje = hoje or date.today()
     seriais_no_aviso = seriais_no_aviso or set()
-    seriais_hoje = seriais_hoje if seriais_hoje is not None else set()
 
     if not avisado_em:
         if falha_envio:
@@ -78,7 +77,13 @@ def calcular_etapa(*, avisado_em=None, falha_envio: str = "",
 
     # Fato consumado tem precedência: o serial sumir da view é a confirmação de
     # que o bloqueio foi executado, independente de status em qualquer lugar.
-    if seriais_no_aviso:
+    #
+    # MAS SÓ SE OS SERIAIS DE HOJE FORAM CONSULTADOS. `seriais_hoje=None`
+    # significa "não fui olhar", e antes virava set() — aí todo serial do aviso
+    # "sumia" e a campanha inteira aparecia como BLOQUEADA no dia do envio,
+    # com prazo ainda correndo. Ausência de informação não é informação: o
+    # mesmo tratamento que `saldo_hoje` já tinha.
+    if seriais_no_aviso and seriais_hoje is not None:
         sumiram = seriais_no_aviso - seriais_hoje
         if sumiram:
             return Estado(BLOQUEADO,
