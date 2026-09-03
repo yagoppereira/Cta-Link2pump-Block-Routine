@@ -98,6 +98,34 @@ def calcular_etapa(*, avisado_em=None, falha_envio: str = "",
     return Estado(AVISADO, f"prazo até {prazo:%d/%m}" if prazo else "")
 
 
+def _numero(valor) -> float:
+    """Converte para float aceitando pt-BR e americano.
+
+    A Campanha_Previa é lida do Sheets, que devolve "4.148,76" com vírgula
+    decimal — `float()` direto estoura com ValueError. Remover o ponto
+    cegamente também não serve: "64.80" viraria 6480.
+
+    A vírgula decide. Se ela existe, o ponto é separador de milhar; se não
+    existe, o ponto é o decimal.
+    """
+    import re as _re
+
+    bruto = str(valor if valor not in (None, "") else 0).strip()
+    # Tira "R$", espaço fino e qualquer coisa que não seja dígito, ponto,
+    # vírgula ou sinal. Sem isso "R$ 1.011,55" caía em 0.0 em silêncio, e
+    # saldo zero num painel de cobrança parece cliente que quitou.
+    bruto = _re.sub(r"[^\d,.\-]", "", bruto)
+    if not bruto:
+        return 0.0
+    if "," in bruto:
+        bruto = bruto.replace(".", "").replace(",", ".")
+    try:
+        return float(bruto)
+    except ValueError:
+        print(f"  AVISO: '{valor}' não é número; tratando como 0")
+        return 0.0
+
+
 def montar(previa: list, log: list, campanha,
            saldo_hoje: dict = None, seriais_hoje: set = None,
            bombas_snapshot: list = None, hoje: date = None) -> list:
@@ -139,7 +167,7 @@ def montar(previa: list, log: list, campanha,
             falha_envio=("" if enviado else (env.get("erro") or env.get("status") or "")),
             prazo=campanha.data_limite,
             hoje=hoje,
-            saldo_no_aviso=float(p.get("total") or 0),
+            saldo_no_aviso=_numero(p.get("total")),
             saldo_hoje=(saldo_hoje or {}).get(cod) if saldo_hoje is not None else None,
             seriais_no_aviso=seriais_por_cliente.get(cod, set()),
             seriais_hoje=seriais_hoje,
