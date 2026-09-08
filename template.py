@@ -407,7 +407,13 @@ def montar_email(cliente, titulos: list, campanha) -> dict:
         )
 
     varios = len(clientes) > 1
-    cnpjs = [c.get("cnpj_cpf", "") for c in clientes if c.get("cnpj_cpf")]
+    # Com máscara. O assunto dos 38 e-mails da 2026-09-B saiu com o número
+    # cru e sem o zero à esquerda — "7636657001241" em vez de
+    # "07.636.657/0012-41". O cliente confere o CNPJ para saber se o aviso é
+    # dele; número deslocado gera dúvida em vez de identificação.
+    import pipefy as _pipefy
+    cnpjs = [_pipefy.formatar_documento(c.get("cnpj_cpf"))
+             for c in clientes if c.get("cnpj_cpf")]
     assunto = ASSUNTO.format(
         razao_social=clientes[0].get("nome_cliente", ""),
         cnpj=" / ".join(cnpjs) if len(cnpjs) <= 2 else f"{len(cnpjs)} CNPJs",
