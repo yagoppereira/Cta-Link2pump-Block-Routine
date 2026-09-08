@@ -392,6 +392,117 @@ def criar_painel_campanhas(gc):
           f"resultado e histórico. O script não reescreve esta aba.")
 
 
+ABA_RESUMO = "Campanhas_Resumo"
+
+
+def resumo_campanhas(gc):
+    """Uma linha por campanha, com as fases pivotadas em colunas.
+
+    A aba Campanhas é append-only e tem uma linha por FASE — boa para histórico,
+    ruim para comparar campanhas: `valor_cobrado` está na linha do preparado e
+    `valor_recuperado` na do reconciliado, e cruzar isso em fórmula do Sheets
+    fica ilegível.
+
+    Esta aba é achatada de propósito: cada linha é uma campanha inteira, com os
+    índices já calculados. É a fonte para gráfico e para o painel.
+
+    Recalculada do zero a cada chamada — não é histórico, é uma projeção do
+    histórico. O que não pode ser perdido está na aba Campanhas.
+    """
+    import pandas as pd
+
+    p1 = io.abrir(gc, ID_DESTINO)
+    registro = io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
+    if not registro:
+        print(f"'{ABA_CAMPANHAS}' vazia; nada a resumir."); return []
+
+    def _n(v):
+        t = str(v or "").strip().replace("R$", "").strip()
+        t = t.replace(".", "").replace(",", ".") if "," in t else t
+        try:
+            return float(t or 0)
+        except ValueError:
+            return 0.0
+
+    # Última linha de cada (campanha, fase) vence: reexecução de uma fase
+    # substitui a anterior em vez de duplicar.
+    por_campanha = {}
+    for l in registro:
+        cid = str(l.get("id_campanha") or "").strip()
+        fase = str(l.get("fase") or "").strip().split(" ")[0]
+        if not cid or not fase:
+            continue
+        por_campanha.setdefault(cid, {})[fase] = l
+
+    linhas = []
+    for cid in sorted(por_campanha, reverse=True):
+        f = por_campanha[cid]
+        regua = f.get("regua", {})
+        prep  = f.get("preparado", {})
+        disp  = f.get("disparado", {})
+        rec   = f.get("reconciliado", {})
+
+        cobrado    = _n(prep.get("valor_cobrado"))
+        recuperado = _n(rec.get("valor_recuperado"))
+        clientes   = _n(prep.get("clientes"))
+        quitou     = _n(rec.get("quitou"))
+        parcial    = _n(rec.get("pagou_parcial"))
+        tit_aviso  = _n(rec.get("titulos_no_aviso")) or _n(prep.get("titulos"))
+        tit_recup  = (_n(rec.get("titulos_quitados"))
+                      + _n(rec.get("titulos_reduzidos")))
+        reneg      = _n(rec.get("renegociaram"))
+
+        def pct(a, b):
+            return round(a / b * 100, 1) if b else ""
+
+        linhas.append({
+            "id_campanha": cid,
+            "data_envio": prep.get("data_envio") or disp.get("data_envio") or "",
+            "data_limite": prep.get("data_limite") or disp.get("data_limite") or "",
+            "reconciliada": "sim" if rec else "não",
+            # funil
+            "com_divida": _n(regua.get("com_divida")) or "",
+            "sem_alocacao": _n(regua.get("sem_alocacao")) or "",
+            "entraram": _n(regua.get("entram")) or "",
+            # execução
+            "clientes": clientes,
+            "titulos": tit_aviso,
+            "valor_cobrado": cobrado,
+            "enviados": _n(disp.get("enviados")),
+            "falhas": _n(disp.get("falhas")),
+            # resultado
+            "quitaram": quitou,
+            "pagaram_parcial": parcial,
+            "renegociaram": reneg,
+            "titulos_recuperados": tit_recup,
+            "valor_recuperado": recuperado,
+            "valor_pago_titulos": _n(rec.get("valor_pago_titulos")),
+            "virou_x90": _n(rec.get("valor_virou_x90")),
+            # índices
+            "pct_valor_recuperado": pct(recuperado, cobrado),
+            "pct_clientes_quitaram": pct(quitou, clientes),
+            "pct_titulos_recuperados": pct(tit_recup, tit_aviso),
+            "pct_renegociacao": pct(reneg, clientes),
+            "pct_alguma_reacao": pct(quitou + parcial + reneg, clientes),
+        })
+
+    df = pd.DataFrame(linhas)
+    io.escrever_aba(p1, ABA_RESUMO, df)
+
+    fechadas = [l for l in linhas if l["reconciliada"] == "sim"]
+    print(f"'{ABA_RESUMO}': {len(linhas)} campanha(s), {len(fechadas)} reconciliada(s).")
+    if fechadas:
+        cob = sum(l["valor_cobrado"] for l in fechadas)
+        rec_ = sum(l["valor_recuperado"] for l in fechadas)
+        print(f"  acumulado: R$ {rec_:,.2f} recuperados de R$ {cob:,.2f} "
+              f"cobrados ({rec_ / cob * 100:.1f}%)" if cob else "")
+    pendentes = [l["id_campanha"] for l in linhas if l["reconciliada"] == "não"]
+    if pendentes:
+        print(f"  sem reconciliação: {', '.join(pendentes)} — "
+              f"os índices ficam vazios até rodar reconciliar()")
+    return linhas
+
+
 def migrar_datas_previa(gc, dry_run: bool = True):
     """Acrescenta data_envio/data_limite às campanhas JÁ congeladas.
 
@@ -1171,6 +1282,132 @@ def atualizar_painel(c, gc, bq=None, saldo_hoje=None, seriais_hoje=None):
     return linhas
 
 
+def _numero_br(valor) -> float:
+    """Aceita "4.148,76" e "4148.76". A prévia vem do Sheets em pt-BR."""
+    import re as _re
+    t = _re.sub(r"[^\d,.\-]", "", str(valor if valor not in (None, "") else 0))
+    if not t:
+        return 0.0
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return 0.0
+
+
+ABA_CONFERENCIA = "Campanha_Conferencia"
+
+
+def conferir_titulos(c, gc, bq, escrever: bool = True) -> dict:
+    """Confere TÍTULO A TÍTULO o que mudou desde o aviso.
+
+    A reconciliação compara saldo somado por cliente, e isso confunde três
+    coisas que não são a mesma:
+
+      - o cliente pagou aquele título
+      - o título foi BAIXADO PARA X90, o que reduz o saldo normal sem ninguém
+        ter pago nada (e a régua vai continuar cobrando, porque X90 é dívida)
+      - o título sumiu da view por outro motivo (cancelamento, unificação)
+
+    No agregado as três parecem pagamento. Aqui não: o join é por
+    codigoLancamento, que é único por lançamento, e comparamos saldo E
+    portador.
+
+    Estados por título:
+      QUITADO     saiu da view com saldo zerado  -> pagou
+      REDUZIDO    saldo menor, mesmo portador    -> pagou em parte
+      X90         virou baixa contábil           -> NÃO pagou
+      INALTERADO  mesmo saldo
+      AUMENTOU    saldo maior (juros capitalizados ou correção no ERP)
+    """
+    p1 = io.abrir(gc, ID_DESTINO)
+    snap = [l for l in io.ler_aba(p1, ABA_TITULOS, obrigatoria=False)
+            if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+    if not snap:
+        print(f"Sem títulos congelados para {c.id_campanha}."); return {}
+
+    lancamentos = [str(l.get("codigoLancamento") or "").strip() for l in snap]
+    lancamentos = [x for x in lancamentos if x]
+
+    sql = f"""
+    SELECT CAST(codigoLancamento AS STRING) AS codigoLancamento,
+           ROUND(saldo, 2)                  AS saldo_hoje,
+           COALESCE(codigoPortador, '')     AS portador_hoje,
+           situacao                         AS situacao_hoje
+    FROM `{PROJECT_ID}.silver.titulos_cigam`
+    WHERE CAST(codigoLancamento AS STRING) IN UNNEST(@lanc)
+    """
+    job = bq.query(sql, job_config=bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("lanc", "STRING", lancamentos)]))
+    agora = {r.codigoLancamento: r for r in job.result()}
+
+    linhas, cont = [], {}
+    for t in snap:
+        lanc = str(t.get("codigoLancamento") or "").strip()
+        antes = _numero_br(t.get("saldo"))
+        port_antes = str(t.get("codigoPortador") or "").strip()
+        r = agora.get(lanc)
+
+        if r is None:
+            estado, saldo_hoje, port_hoje = "QUITADO", 0.0, ""
+        else:
+            saldo_hoje = float(r.saldo_hoje or 0)
+            port_hoje = r.portador_hoje
+            if port_hoje.startswith("X9") and not port_antes.startswith("X9"):
+                estado = "X90"          # baixa contábil, não pagamento
+            elif saldo_hoje <= 0:
+                estado = "QUITADO"
+            elif saldo_hoje < antes - 0.005:
+                estado = "REDUZIDO"
+            elif saldo_hoje > antes + 0.005:
+                estado = "AUMENTOU"
+            else:
+                estado = "INALTERADO"
+
+        cont[estado] = cont.get(estado, 0) + 1
+        linhas.append({
+            "id_campanha": c.id_campanha,
+            "codigo_cliente": t.get("codigo_cliente"),
+            "nome_cliente": t.get("nome_cliente"),
+            "codigoLancamento": lanc,
+            "doc": t.get("doc"),
+            "dataVencimento": t.get("dataVencimento"),
+            "estado": estado,
+            "saldo_no_aviso": antes,
+            "saldo_hoje": saldo_hoje,
+            "variacao": round(saldo_hoje - antes, 2),
+            "portador_no_aviso": port_antes or "—",
+            "portador_hoje": port_hoje or "—",
+        })
+
+    pago = round(sum(l["saldo_no_aviso"] - l["saldo_hoje"] for l in linhas
+                     if l["estado"] in ("QUITADO", "REDUZIDO")), 2)
+    virou_x90 = round(sum(l["saldo_no_aviso"] for l in linhas
+                          if l["estado"] == "X90"), 2)
+
+    print(f"{len(linhas)} título(s) conferido(s):")
+    for e in ("QUITADO", "REDUZIDO", "INALTERADO", "AUMENTOU", "X90"):
+        if cont.get(e):
+            print(f"   {e:<11} {cont[e]:>4}")
+    print(f"  pago de verdade:  R$ {pago:,.2f}")
+    if virou_x90:
+        print(f"  virou X90:        R$ {virou_x90:,.2f}  <- NÃO é pagamento; "
+              f"no agregado por cliente pareceria quitação")
+
+    if escrever:
+        import pandas as pd
+        io.escrever_aba(p1, ABA_CONFERENCIA, pd.DataFrame(linhas))
+
+    return {"linhas": linhas, "contagem": cont,
+            "valor_pago": pago, "valor_x90": virou_x90}
+
+
+ABA_TITULOS_RESULTADO = "Campanha_Titulos_Resultado"
+
+
+
+
 def reconciliar(c, gc, bq) -> dict:
     """Única releitura do BigQuery no ciclo. Quem zerou sai; quem pagou em
     parte é decisão humana — abrir card de bloqueio para quem pagou no dia 12
@@ -1179,24 +1416,52 @@ def reconciliar(c, gc, bq) -> dict:
     previa = [l for l in io.ler_aba(p1, ABA_PREVIA) if l["id_campanha"] == c.id_campanha]
     codigos = [l["codigo_cliente"] for l in previa]
 
+    # X90 CONTA, como em todo o resto do pipeline. Excluir aqui era pior que
+    # inconsistente: o saldo_no_aviso INCLUI X90 e o de hoje não incluía, então
+    # todo cliente com dívida X90 parecia ter pago exatamente esse valor. A
+    # Construtora Luiz Costa, com R$ 6.758 100% X90, apareceria como quitada.
     sql = f"""
-    SELECT codigoEmpresa AS codigo_cliente, ROUND(SUM(saldo),2) AS saldo_hoje
+    SELECT codigoEmpresa AS codigo_cliente,
+           ROUND(SUM(saldo), 2) AS saldo_hoje,
+           COUNT(*)             AS titulos_hoje
     FROM `{PROJECT_ID}.silver.titulos_cigam`
     WHERE codigoEmpresa IN UNNEST(@codigos)
-      AND saldo > 0 AND COALESCE(codigoPortador,'') != 'X90'
+      AND saldo > 0
+      AND dataVencimento < CURRENT_DATE('America/Sao_Paulo')
     GROUP BY 1
     """
     job = bq.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=[bigquery.ArrayQueryParameter("codigos", "STRING", codigos)]))
-    hoje = {r.codigo_cliente: float(r.saldo_hoje) for r in job.result()}
+    linhas_hoje = {r.codigo_cliente: (float(r.saldo_hoje), int(r.titulos_hoje))
+                   for r in job.result()}
+    hoje = {k: v[0] for k, v in linhas_hoje.items()}
 
     quitou, parcial, mantem = [], [], []
+    tit_antes = tit_hoje = 0
     for l in previa:
-        antes = float(l["saldo"] or 0)
+        antes = _numero_br(l.get("saldo"))
         agora = hoje.get(l["codigo_cliente"], 0.0)
+        n_antes = int(float(l.get("titulos") or 0))
+        n_hoje = linhas_hoje.get(l["codigo_cliente"], (0.0, 0))[1]
+        tit_antes += n_antes
+        tit_hoje += n_hoje
         registro = {**l, "saldo_no_aviso": antes, "saldo_hoje": agora,
-                    "pagou": round(antes - agora, 2)}
+                    "pagou": round(antes - agora, 2),
+                    "titulos_no_aviso": n_antes, "titulos_hoje": n_hoje}
         (quitou if agora <= 0 else parcial if agora < antes else mantem).append(registro)
+
+    # RENEGOCIAÇÃO: quem está na prévia PASSOU pelo filtro de acordo, ou seja,
+    # não tinha acordo vigente quando foi avisado. Se aparece na aba ACORDOS
+    # agora, negociou depois do aviso. É a medida limpa do efeito da campanha
+    # sobre negociação — não dá para confundir com acordo antigo.
+    renegociaram = []
+    try:
+        import acordos as ac
+        reg_ac = ac.carregar(gc, io)
+        renegociaram = [l["codigo_cliente"] for l in previa
+                        if reg_ac.status(l["codigo_cliente"]) in (ac.PAGANDO, ac.QUEBRADO)]
+    except Exception as exc:
+        print(f"  (não consegui medir renegociação: {type(exc).__name__})")
 
     print(f"quitou: {len(quitou)} | pagou em parte: {len(parcial)} | "
           f"sem movimento: {len(mantem)}")
@@ -1205,14 +1470,33 @@ def reconciliar(c, gc, bq) -> dict:
         for r in parcial:
             print(f"   {r['codigo_cliente']} {r['nome_cliente'][:30]}: "
                   f"{r['saldo_no_aviso']:.2f} -> {r['saldo_hoje']:.2f}")
+    recuperado = round(sum(r["saldo_no_aviso"] - r["saldo_hoje"]
+                           for r in quitou + parcial), 2)
+    if renegociaram:
+        print(f"renegociaram depois do aviso: {len(renegociaram)} "
+              f"({', '.join(renegociaram[:8])}{'...' if len(renegociaram) > 8 else ''})")
+
+    # Conferência TÍTULO A TÍTULO, não a contagem líquida. tit_antes - tit_hoje
+    # erra quando o cliente quita antigos e novos vencem no prazo.
+    conf = conferir_titulos(c, gc, bq)
+    cont = conf.get("contagem", {})
+
     registrar(gc, c, "reconciliado",
               quitou=len(quitou), pagou_parcial=len(parcial),
               mantem_bloqueio=len(mantem),
-              valor_recuperado=round(
-                  sum(float(r.get("saldo_no_aviso") or 0)
-                      - float(r.get("saldo_hoje") or 0)
-                      for r in quitou + parcial), 2))
-    return {"quitou": quitou, "parcial": parcial, "mantem": mantem}
+              valor_recuperado=recuperado,
+              titulos_no_aviso=tit_antes,
+              titulos_quitados=cont.get("QUITADO", 0),
+              titulos_reduzidos=cont.get("REDUZIDO", 0),
+              titulos_inalterados=cont.get("INALTERADO", 0),
+              titulos_viraram_x90=cont.get("X90", 0),
+              # "pago de verdade" exclui o que só virou baixa contábil. No
+              # agregado por cliente, X90 parece quitação e infla a recuperação.
+              valor_pago_titulos=conf.get("pago", 0.0),
+              valor_virou_x90=conf.get("virou_x90", 0.0),
+              renegociaram=len(renegociaram))
+    return {"quitou": quitou, "parcial": parcial, "mantem": mantem,
+            "renegociaram": renegociaram}
 
 
 def gerar_cards(c, gc, codigos: list) -> list:
