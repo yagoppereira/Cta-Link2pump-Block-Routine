@@ -1148,9 +1148,12 @@ def montar_fila(c, gc) -> list:
 
     fila = []
     for cli in previa:
-        cod = cli["codigo_cliente"]
-        tit = [_num(t) for t in titulos if t["codigo_cliente"] == cod]
-        bmb = [_bool(b) for b in bombas if b["codigo_cliente"] == cod]
+        # Normaliza os três lados. Aqui as fontes vêm todas da mesma planilha e
+        # casavam por acidente, não por desenho: bastava uma delas passar a ter
+        # zero à esquerda para o e-mail sair sem títulos ou sem bombas.
+        cod = _codigo(cli["codigo_cliente"])
+        tit = [_num(t) for t in titulos if _codigo(t["codigo_cliente"]) == cod]
+        bmb = [_bool(b) for b in bombas if _codigo(b["codigo_cliente"]) == cod]
         if not tit:
             continue
 
@@ -1539,13 +1542,30 @@ def gerar_cards(c, gc, codigos: list) -> list:
 
     cards = []
     for cod in codigos:
-        bmb = [_bool(b) for b in bombas if b["codigo_cliente"] == cod]
+        bmb = [_bool(b) for b in bombas
+               if _codigo(b["codigo_cliente"]) == cod]
+        if cod not in previa:
+            print(f"  {cod}: não está na prévia desta campanha — card não gerado")
+            continue
         if not bmb:
             print(f"  {cod}: sem bomba no snapshot — card não gerado")
             continue
         cards.append(pipefy.montar_card(
             previa[cod], bmb, campanha=c,
-            total_devido=float(previa[cod]["total"] or 0)))
+            total_devido=_numero_br(previa[cod].get("total"))))
+
+    # TRAVA. Zero cards com lista não vazia é falha de casamento, não decisão
+    # de negócio — foi o que aconteceu quando eu normalizei a prévia e a lista
+    # mas esqueci a Campanha_Bombas: 36 clientes "sem bomba" que têm bomba.
+    if codigos and not cards:
+        raise RuntimeError(
+            f"{len(codigos)} cliente(s) na lista e NENHUM card gerado. "
+            f"Isso é falha de chave, não ausência de bloqueio. "
+            f"Códigos enviados: {codigos[:3]}; "
+            f"na prévia: {list(previa)[:3]}; "
+            f"em '{ABA_BOMBAS}': "
+            f"{[_codigo(b['codigo_cliente']) for b in bombas[:3]]}")
+
     print(f"{len(cards)} card(s) prontos para abrir no Pipefy.")
     return cards
 
