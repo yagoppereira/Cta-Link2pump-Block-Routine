@@ -1636,7 +1636,9 @@ def _escrever_cards(gc, c, cards: list):
 
     linhas = []
     for card in cards:
-        cod = _codigo(card.get("codigo_cliente"))
+        # As chaves internas do card têm sublinhado: `_codigo_cliente` e
+        # `_qtd_equipamentos`. Lendo sem ele, a coluna saía vazia nas 36 linhas.
+        cod = _codigo(card.get("_codigo_cliente"))
         ja = humano.get((c.id_campanha, cod), {})
         linhas.append({
             "id_campanha": c.id_campanha,
@@ -1644,7 +1646,7 @@ def _escrever_cards(gc, c, cards: list):
             "cliente": card.get("titulo"),
             "cnpj": card.get("cnpj"),
             "tipo_solicitacao": card.get("tipo_solicitacao"),
-            "bombas": len(card.get("_bombas") or []) or "",
+            "equipamentos": card.get("_qtd_equipamentos", ""),
             "sistema_seguro": card.get("_bloqueio_de_sistema_seguro"),
             "observacoes": card.get("observacoes"),
             # suas, nunca sobrescritas
