@@ -1282,6 +1282,20 @@ def atualizar_painel(c, gc, bq=None, saldo_hoje=None, seriais_hoje=None):
     return linhas
 
 
+def _codigo(valor) -> str:
+    """Código CIGAM com 6 dígitos. O Sheets come o zero à esquerda quando o
+    valor entra como número, então a Campanha_Previa guarda `2554` e o DW usa
+    `002554` — o IN UNNEST não casa e o saldo de hoje vem vazio.
+
+    Consequência real na 2026-09-B: os 38 clientes apareceram como quitados e
+    a campanha registrou R$ 190.513,82 de recuperação inexistente. O nível
+    título escapou porque casa por codigoLancamento, não por código.
+    """
+    import re as _re
+    d = _re.sub(r"\D", "", str(valor or ""))
+    return d.zfill(6) if d else ""
+
+
 def _numero_br(valor) -> float:
     """Aceita "4.148,76" e "4148.76". A prévia vem do Sheets em pt-BR."""
     import re as _re
@@ -1414,7 +1428,7 @@ def reconciliar(c, gc, bq) -> dict:
     é o erro que queima a operação inteira."""
     p1 = io.abrir(gc, ID_DESTINO)
     previa = [l for l in io.ler_aba(p1, ABA_PREVIA) if l["id_campanha"] == c.id_campanha]
-    codigos = [l["codigo_cliente"] for l in previa]
+    codigos = [_codigo(l["codigo_cliente"]) for l in previa]
 
     # X90 CONTA, como em todo o resto do pipeline. Excluir aqui era pior que
     # inconsistente: o saldo_no_aviso INCLUI X90 e o de hoje não incluía, então
@@ -1436,13 +1450,24 @@ def reconciliar(c, gc, bq) -> dict:
                    for r in job.result()}
     hoje = {k: v[0] for k, v in linhas_hoje.items()}
 
+    # TRAVA. Zero clientes com saldo hoje, numa campanha inteira, é quase
+    # sempre falha de casamento de chave — e o resultado dela é "todos
+    # quitaram", que é exatamente o erro mais caro que este script pode
+    # cometer. Aconteceu na 2026-09-B por causa do zero à esquerda.
+    if not linhas_hoje and len(codigos) > 3:
+        raise RuntimeError(
+            f"Nenhum dos {len(codigos)} clientes tem saldo vencido hoje no DW. "
+            f"Isso classificaria TODOS como quitados. Confira o formato do "
+            f"código: enviei {codigos[:3]}, o DW usa 6 dígitos com zero à "
+            f"esquerda (ex.: '002554').")
+
     quitou, parcial, mantem = [], [], []
     tit_antes = tit_hoje = 0
     for l in previa:
         antes = _numero_br(l.get("saldo"))
-        agora = hoje.get(l["codigo_cliente"], 0.0)
+        agora = hoje.get(_codigo(l["codigo_cliente"]), 0.0)
         n_antes = int(float(l.get("titulos") or 0))
-        n_hoje = linhas_hoje.get(l["codigo_cliente"], (0.0, 0))[1]
+        n_hoje = linhas_hoje.get(_codigo(l["codigo_cliente"]), (0.0, 0))[1]
         tit_antes += n_antes
         tit_hoje += n_hoje
         registro = {**l, "saldo_no_aviso": antes, "saldo_hoje": agora,
@@ -1459,7 +1484,8 @@ def reconciliar(c, gc, bq) -> dict:
         import acordos as ac
         reg_ac = ac.carregar(gc, io)
         renegociaram = [l["codigo_cliente"] for l in previa
-                        if reg_ac.status(l["codigo_cliente"]) in (ac.PAGANDO, ac.QUEBRADO)]
+                        if reg_ac.status(_codigo(l["codigo_cliente"]))
+                        in (ac.PAGANDO, ac.QUEBRADO)]
     except Exception as exc:
         print(f"  (não consegui medir renegociação: {type(exc).__name__})")
 
@@ -1502,8 +1528,12 @@ def reconciliar(c, gc, bq) -> dict:
 def gerar_cards(c, gc, codigos: list) -> list:
     """Texto dos cards, a partir do CONGELADO. `codigos` sai da reconciliação —
     esta função não decide quem bloqueia."""
+    codigos = [_codigo(x) for x in codigos]
     p1 = io.abrir(gc, ID_DESTINO)
-    previa = {l["codigo_cliente"]: l for l in io.ler_aba(p1, ABA_PREVIA)
+    # Normaliza os DOIS lados. A lista vem da reconciliação (já normalizada) e
+    # a prévia do Sheets (sem zero à esquerda): sem isto nenhum card sairia, e
+    # "zero cards" pareceria "ninguém a bloquear".
+    previa = {_codigo(l["codigo_cliente"]): l for l in io.ler_aba(p1, ABA_PREVIA)
               if l["id_campanha"] == c.id_campanha}
     bombas = [l for l in io.ler_aba(p1, ABA_BOMBAS) if l["id_campanha"] == c.id_campanha]
 
