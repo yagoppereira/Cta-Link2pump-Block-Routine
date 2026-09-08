@@ -45,7 +45,18 @@ def abrir(gc, spreadsheet_id: str):
 
 
 def ler_aba(planilha, nome: str, obrigatoria: bool = True) -> list:
-    """Devolve list[dict]. Cabeçalho normalizado para minúsculo sem espaço."""
+    """Devolve list[dict] com a chave em minúsculo E na grafia original.
+
+    O cabeçalho era só minúsculo, e isso causou o mesmo erro cinco vezes: o
+    escrever_aba grava `codigoLancamento`, `codigoContrato`, `dataVencimento`
+    em camelCase, e quem lia procurava por esse nome e recebia None. O caso
+    mais grave foi a reconciliação da 2026-09-B: os 268 ids saíram vazios, a
+    query não casou com nada, e ausência de título significa pago — a campanha
+    inteira apareceu como quitada, R$ 190 mil de "recuperação" que não houve.
+
+    Guardar as duas grafias é redundante e resolve na origem, em vez de exigir
+    que cada consumidor lembre de traduzir.
+    """
     try:
         ws = com_retry(planilha.worksheet, nome)
     except WorksheetNotFound:
@@ -60,13 +71,19 @@ def ler_aba(planilha, nome: str, obrigatoria: bool = True) -> list:
     if len(valores) < 2:
         return []
 
-    cab = [re.sub(r"\s+", "_", str(c).strip()).lower() for c in valores[0]]
+    bruto = [re.sub(r"\s+", "_", str(c).strip()) for c in valores[0]]
+    cab = [c.lower() for c in bruto]
     linhas = []
     for row in valores[1:]:
         if not any(str(c).strip() for c in row):
             continue
         row = list(row) + [""] * (len(cab) - len(row))
-        linhas.append(dict(zip(cab, row)))
+        d = dict(zip(cab, row))
+        # Alias na grafia original, quando difere do minúsculo.
+        for original, valor in zip(bruto, row):
+            if original != original.lower():
+                d[original] = valor
+        linhas.append(d)
     return linhas
 
 
