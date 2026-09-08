@@ -113,6 +113,25 @@ def calcular_etapa(*, avisado_em=None, falha_envio: str = "",
     return Estado(AVISADO, f"prazo até {prazo:%d/%m}" if prazo else "")
 
 
+def _mesmo_codigo(a, b) -> bool:
+    """Compara códigos ignorando zero à esquerda.
+
+    Dentro do painel todas as fontes vêm da mesma planilha e são consistentes,
+    mas `saldo_hoje` e `seriais_hoje` chegam do DW, que usa 6 dígitos com zero.
+    Comparar '2554' com '002554' devolveria falso e o saldo de hoje ficaria
+    sempre vazio.
+    """
+    import re as _re
+    return (_re.sub(r"\D", "", str(a or "")).lstrip("0")
+            == _re.sub(r"\D", "", str(b or "")).lstrip("0"))
+
+
+def _chave_codigo(v) -> str:
+    """Forma canônica para usar como chave de dicionário."""
+    import re as _re
+    return _re.sub(r"\D", "", str(v or "")).lstrip("0")
+
+
 def _numero(valor) -> float:
     """Converte para float aceitando pt-BR e americano.
 
@@ -206,7 +225,8 @@ def montar(previa: list, log: list, campanha,
             prazo=campanha.data_limite,
             hoje=hoje,
             saldo_no_aviso=_numero(p.get("total")),
-            saldo_hoje=(saldo_hoje or {}).get(cod) if saldo_hoje is not None else None,
+            saldo_hoje=({_chave_codigo(k): v for k, v in (saldo_hoje or {}).items()}
+                        .get(_chave_codigo(cod)) if saldo_hoje is not None else None),
             seriais_no_aviso=seriais_por_cliente.get(cod, set()),
             seriais_hoje=seriais_hoje,
             etapa_anterior=(etapa_anterior or {}).get(cod, ""),
