@@ -1,3 +1,4 @@
+import re
 """
 Conteúdo do card de bloqueio no Pipefy.
 
@@ -103,6 +104,31 @@ def montar_observacoes(bombas_snapshot: list,
     return "\n".join(linhas)
 
 
+def formatar_documento(valor) -> str:
+    """CNPJ/CPF com máscara, restaurando o zero à esquerda.
+
+    O Sheets come o zero quando o valor entra como número: 07.636.657/0012-41
+    chega como 7636657001241, com 13 dígitos. Sem o zero-padding a máscara
+    sai deslocada, e o card vai para o suporte com CNPJ que não existe.
+
+    14 dígitos -> CNPJ, 11 -> CPF. Comprimentos intermediários são o zero
+    perdido; acima ou abaixo, devolve como está em vez de inventar formato.
+    """
+    d = re.sub(r"\D", "", str(valor or ""))
+    if not d:
+        return ""
+    if 11 < len(d) <= 14:
+        d = d.zfill(14)
+    elif 8 < len(d) <= 11:
+        d = d.zfill(11)
+
+    if len(d) == 14:
+        return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}"
+    if len(d) == 11:
+        return f"{d[:3]}.{d[3:6]}.{d[6:9]}-{d[9:]}"
+    return str(valor or "")
+
+
 def montar_card(cliente: dict, bombas_snapshot: list, campanha=None,
                 total_devido=None, grupo=None) -> dict:
     """Payload do card. Os campos de valor único ficam vazios de propósito:
@@ -122,7 +148,7 @@ def montar_card(cliente: dict, bombas_snapshot: list, campanha=None,
 
     return {
         "titulo": cliente.get("nome_cliente", ""),
-        "cnpj": cliente.get("cnpj_cpf", ""),
+        "cnpj": formatar_documento(cliente.get("cnpj_cpf")),
         "tipo_solicitacao": TIPO_SO_BOMBA if inseguro else TIPO_SISTEMA_E_BOMBA,
         "serial_da_placa": "",
         "nome_da_bomba_sistema_cta": "",
