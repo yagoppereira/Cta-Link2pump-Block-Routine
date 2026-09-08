@@ -28,6 +28,7 @@ confirmada contra a planilha real. Rode a fase A com 2 ou 3 clientes antes.
 
 from datetime import date
 import re
+import types
 from pathlib import Path
 
 import pandas as pd
@@ -1285,6 +1286,11 @@ def atualizar_painel(c, gc, bq=None, saldo_hoje=None, seriais_hoje=None):
     return linhas
 
 
+def _bool_valor(v) -> bool:
+    """'TRUE'/'1'/'sim' -> True. O Sheets devolve booleano como texto."""
+    return str(v or "").strip().upper() in ("TRUE", "1", "SIM", "VERDADEIRO")
+
+
 def _codigo(valor) -> str:
     """Código CIGAM com 6 dígitos. O Sheets come o zero à esquerda quando o
     valor entra como número, então a Campanha_Previa guarda `2554` e o DW usa
@@ -1528,7 +1534,10 @@ def reconciliar(c, gc, bq) -> dict:
             "renegociaram": renegociaram}
 
 
-def gerar_cards(c, gc, codigos: list) -> list:
+ABA_CARDS = "Campanha_Cards"
+
+
+def gerar_cards(c, gc, codigos: list, escrever: bool = True) -> list:
     """Texto dos cards, a partir do CONGELADO. `codigos` sai da reconciliação —
     esta função não decide quem bloqueia."""
     codigos = [_codigo(x) for x in codigos]
@@ -1550,9 +1559,38 @@ def gerar_cards(c, gc, codigos: list) -> list:
         if not bmb:
             print(f"  {cod}: sem bomba no snapshot — card não gerado")
             continue
+        # O tipo de solicitação depende do GRUPO, e o snapshot já tem as
+        # colunas: sem passar isto, `inseguro` é sempre falso e todo card sai
+        # como "Bloqueio do sistema e da bomba" — inclusive os que têm bomba
+        # de pagante adimplente no mesmo sistema, cujo bloqueio de sistema
+        # derrubaria quem pagou em dia. Foi o que aconteceu na 2026-09-B: 36
+        # de 36 cards com o tipo mais agressivo.
+        seguro = all(_bool_valor(b.get("bloqueio_de_sistema_seguro"))
+                     for b in bmb)
+        adimplentes = max((int(float(b.get("bombas_de_adimplentes") or 0))
+                           for b in bmb), default=0)
+        nomes = sorted({str(b.get("adimplentes_no_sistema") or "").strip()
+                        for b in bmb} - {""})
+        # O pipefy consome quatro atributos do grupo. Montar só parte deles
+        # estoura na hora de escrever as observações, então os quatro saem do
+        # snapshot — que já tem todas essas colunas.
+        ids_sistema = sorted({str(b.get("cliente_id") or "").strip()
+                              for b in bmb} - {""})
+        # `adimplentes_no_sistema` vem com os nomes separados por " | ".
+        terceiros = sorted({n.strip()
+                            for b in bmb
+                            for n in str(b.get("adimplentes_no_sistema") or "").split("|")
+                            if n.strip()})
+        grupo = types.SimpleNamespace(
+            bloqueio_de_sistema_seguro=seguro,
+            bombas_de_adimplentes=adimplentes,
+            cliente_ids=ids_sistema,
+            terceiros_adimplentes=terceiros,
+        )
         cards.append(pipefy.montar_card(
             previa[cod], bmb, campanha=c,
-            total_devido=_numero_br(previa[cod].get("total"))))
+            total_devido=_numero_br(previa[cod].get("total")),
+            grupo=grupo))
 
     # TRAVA. Zero cards com lista não vazia é falha de casamento, não decisão
     # de negócio — foi o que aconteceu quando eu normalizei a prévia e a lista
@@ -1566,8 +1604,64 @@ def gerar_cards(c, gc, codigos: list) -> list:
             f"em '{ABA_BOMBAS}': "
             f"{[_codigo(b['codigo_cliente']) for b in bombas[:3]]}")
 
-    print(f"{len(cards)} card(s) prontos para abrir no Pipefy.")
+    por_tipo = {}
+    for card in cards:
+        t = card["tipo_solicitacao"]
+        por_tipo[t] = por_tipo.get(t, 0) + 1
+    print(f"{len(cards)} card(s) prontos:")
+    for t, n in sorted(por_tipo.items()):
+        print(f"   {n:>3}  {t}")
+
+    if escrever and cards:
+        _escrever_cards(gc, c, cards)
     return cards
+
+
+def _escrever_cards(gc, c, cards: list):
+    """Grava os cards na planilha, preservando o que você já preencheu.
+
+    Sem isto o texto só existia no output do Colab: fechando a sessão, os 36
+    cards somem, e se você abrir 20 e o runtime cair não há registro de quais
+    faltam. As colunas `aberto_em` e `card_id` são SUAS — o script nunca as
+    sobrescreve, então dá para marcar o que já foi para o Pipefy.
+    """
+    import pandas as pd
+
+    p1 = io.abrir(gc, ID_DESTINO)
+    antigas = io.ler_aba(p1, ABA_CARDS, obrigatoria=False)
+
+    # Preserva o preenchimento humano por (campanha, cliente).
+    humano = {(str(l.get("id_campanha") or "").strip(),
+               _codigo(l.get("codigo_cliente"))): l for l in antigas}
+
+    linhas = []
+    for card in cards:
+        cod = _codigo(card.get("codigo_cliente"))
+        ja = humano.get((c.id_campanha, cod), {})
+        linhas.append({
+            "id_campanha": c.id_campanha,
+            "codigo_cliente": cod,
+            "cliente": card.get("titulo"),
+            "cnpj": card.get("cnpj"),
+            "tipo_solicitacao": card.get("tipo_solicitacao"),
+            "bombas": len(card.get("_bombas") or []) or "",
+            "sistema_seguro": card.get("_bloqueio_de_sistema_seguro"),
+            "observacoes": card.get("observacoes"),
+            # suas, nunca sobrescritas
+            "aberto_em": ja.get("aberto_em", ""),
+            "card_id": ja.get("card_id", ""),
+        })
+
+    # Mantém as campanhas anteriores na aba.
+    outras = [l for l in antigas
+              if str(l.get("id_campanha") or "").strip() != c.id_campanha]
+    df = pd.DataFrame(outras + linhas)
+    io.escrever_aba(p1, ABA_CARDS, df)
+
+    ja_abertos = sum(1 for l in linhas if str(l["card_id"]).strip())
+    print(f"  '{ABA_CARDS}': {len(linhas)} card(s) desta campanha"
+          + (f", {ja_abertos} já com card_id preenchido." if ja_abertos
+             else ". Preencha `card_id` conforme abrir no Pipefy."))
 
 
 # ------------------------------------------------------------------ utilitários
