@@ -152,6 +152,14 @@ divida AS (
   SELECT
     a.codigoEmpresa AS codigo,
     COUNT(DISTINCT DATE_TRUNC(a.venc, MONTH))          AS frequencia_propria,
+    -- Meses vencidos DENTRO DO ANO CORRENTE. Dívida antiga sozinha não
+    -- sustenta bloqueio: um cliente que parou de pagar em 2023, quitou o
+    -- corrente e carrega resíduo velho tem perfil diferente de quem está
+    -- deixando de pagar agora. O segundo é caso de régua; o primeiro é
+    -- cobrança de outra natureza e vai para controle paralelo.
+    COUNT(DISTINCT IF(EXTRACT(YEAR FROM a.venc)
+                      = EXTRACT(YEAR FROM CURRENT_DATE('America/Sao_Paulo')),
+                      DATE_TRUNC(a.venc, MONTH), NULL))  AS meses_ano_corrente,
     COUNT(*)                                           AS titulos_abertos,
     ROUND(SUM(a.em_aberto), 2)                         AS em_atraso,
     -- Faturas vencidas, para casar com o DOC da aba ACORDOS (que grava
@@ -210,6 +218,7 @@ SELECT
 
   f.frequencia,                             -- do GRUPO, só cadastros com bomba
   d.frequencia_propria,                     -- só deste cadastro — precisa merecer
+  d.meses_ano_corrente,                     -- quantos desses meses são deste ano
   f.frequencia_grupo_bruta,                 -- com os sem-bomba, para comparar
   f.cadastros_no_grupo,
   f.cadastros_com_bomba,
