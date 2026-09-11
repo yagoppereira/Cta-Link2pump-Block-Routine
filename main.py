@@ -61,6 +61,7 @@ ABA_BOMBAS = "Campanha_Bombas"
 ABA_LOG = "Campanha_Log"
 ABA_TRIAGEM = "Triagem"
 ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
+ABA_TRIAGEM_ANTIGA = "Triagem_Divida_Antiga"
 ABA_EXCECOES = "Nunca_Notificar"
 ABA_CAMPANHAS = "Campanhas"
 ABA_EMAIL_VEND = "Email_Vendedores"
@@ -396,6 +397,158 @@ def criar_painel_campanhas(gc):
 ABA_RESUMO = "Campanhas_Resumo"
 
 
+def auditar_titulos(c, gc, bq, escrever: bool = True) -> dict:
+    """O que aconteceu com CADA título da campanha, com data e motivo.
+
+    Substitui a comparação com a base inteira, que era um erro de desenho: a
+    régua seleciona os piores pagantes, então compará-los com a média mede a
+    seleção, não a campanha. O que responde é factual e por título.
+
+    Cada baixa é um lançamento próprio (codigoTipo 'E', ligado pelo
+    codigoPartida) com data, valor, portador e histórico. O PORTADOR diz a
+    natureza, e é isso que separa recuperação de movimentação contábil:
+
+      C0x, I0x, Y01   pagamento em banco — dinheiro que entrou
+      X30             abatimento — motivo escrito no histórico
+      X90/X91/X92     baixa contábil — não é pagamento
+      X50             outro; sai nomeado para não virar "pago" por omissão
+
+    JUROS entram pela SITUACAO, não pelo portador. Juros recebido é lançamento
+    próprio na conta 103001 com situacao 'J', ligado ao título pelo mesmo
+    codigoPartida. Filtrar só ('L','U') perdia todos: na 2026-09-B eram
+    R$ 697,33 em 11 títulos de 5 clientes, invisíveis no total.
+
+    Isso importa para a discussão com o comercial: o valor cobrado no aviso é
+    principal + encargos, então medir só o principal recebido subestima o que
+    a campanha trouxe. A Lactopar pagou R$ 281,25 de principal e R$ 31,83 de
+    juros — exatamente os R$ 313,08 do card.
+
+    Na 2026-09-B: R$ 14.674,77 pagos em banco, mas R$ 6.134,13 de baixa
+    contábil e R$ 1.974,00 de abatimento ("NF de retorno 25704"). Uma conta que
+    olhasse só a variação de saldo somaria os três e reportaria R$ 22 mil de
+    recuperação, dos quais R$ 8 mil nunca entraram.
+    """
+    import pandas as pd
+
+    p1 = io.abrir(gc, ID_DESTINO)
+    congelados = [l for l in io.ler_aba(p1, ABA_TITULOS, obrigatoria=False)
+                  if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+    if not congelados:
+        raise RuntimeError(f"Nada em '{ABA_TITULOS}' para {c.id_campanha}.")
+
+    ids = sorted({str(l.get("codigoLancamento")
+                      or l.get("codigolancamento") or "").strip()
+                  for l in congelados} - {""})
+    if not ids:
+        raise RuntimeError(
+            f"Sem codigoLancamento em '{ABA_TITULOS}' — não dá para auditar "
+            f"título a título.")
+
+    sql = f"""
+    SELECT
+      l.codigoPartida AS codigoLancamento,
+      l.codigoEmpresa AS codigo_cliente,
+      SAFE.PARSE_DATE('%d/%m/%Y', l.data) AS data_baixa,
+      l.codigoPortador AS portador,
+      SAFE_CAST(l.valor AS FLOAT64) AS valor,
+      NULLIF(TRIM(l.complementoHistorico), '') AS motivo,
+      l.situacao AS situacao,
+      CASE
+        WHEN l.situacao = 'J'                                THEN 'JUROS'
+        WHEN STARTS_WITH(COALESCE(l.codigoPortador,''),'C')
+          OR STARTS_WITH(COALESCE(l.codigoPortador,''),'I')
+          OR STARTS_WITH(COALESCE(l.codigoPortador,''),'Y')  THEN 'PAGO'
+        WHEN l.codigoPortador = 'X30'                        THEN 'ABATIDO'
+        WHEN STARTS_WITH(COALESCE(l.codigoPortador,''),'X9') THEN 'BAIXA CONTABIL'
+        ELSE CONCAT('OUTRO (', COALESCE(l.codigoPortador,'?'), ')')
+      END AS natureza
+    FROM `{PROJECT_ID}.silver.lancamentos_enriquecidos` l
+    WHERE l.codigoTipo = 'E' AND l.situacao IN ('L','U','J')
+      AND l.codigoPartida IN UNNEST(@ids)
+      AND SAFE.PARSE_DATE('%d/%m/%Y', l.data) >= DATE '{c.data_envio:%Y-%m-%d}'
+    ORDER BY 2, 3
+    """
+    eventos = [dict(r) for r in bq.query(sql, job_config=bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("ids","STRING",ids)])).result()]
+
+    por_titulo = {}
+    for e in eventos:
+        por_titulo.setdefault(str(e["codigoLancamento"]), []).append(e)
+
+    # Acordo firmado DEPOIS do aviso: quem está na prévia passou pelo filtro,
+    # logo não tinha acordo vigente quando foi avisado.
+    em_acordo = set()
+    try:
+        import acordos as ac
+        reg = ac.carregar(gc, io)
+        em_acordo = {cod for cod in {_codigo(l.get("codigo_cliente"))
+                                     for l in congelados}
+                     if reg.status(cod) in (ac.PAGANDO, ac.QUEBRADO)}
+    except Exception as exc:
+        print(f"  (acordos não lidos: {type(exc).__name__})")
+
+    linhas, resumo = [], {}
+    for t in congelados:
+        tid = str(t.get("codigoLancamento") or t.get("codigolancamento") or "").strip()
+        cod = _codigo(t.get("codigo_cliente"))
+        evs = por_titulo.get(tid, [])
+
+        if not evs:
+            estado = "ACORDADO (sem baixa)" if cod in em_acordo else "SEM MOVIMENTO"
+        else:
+            naturezas = {e["natureza"] for e in evs}
+            # JUROS sozinho não é estado do título — é acessório do pagamento.
+            estado = ("PAGO" if "PAGO" in naturezas
+                      else sorted(naturezas - {"JUROS"})[0]
+                      if naturezas - {"JUROS"} else "JUROS PAGO (principal em aberto)")
+
+        resumo[estado] = resumo.get(estado, 0) + 1
+        linhas.append({
+            "id_campanha": c.id_campanha,
+            "codigo_cliente": cod,
+            "nome_cliente": t.get("nome_cliente"),
+            "codigoLancamento": tid,
+            "doc": t.get("doc"),
+            "saldo_no_aviso": _numero_br(t.get("saldo")),
+            "estado": estado,
+            "baixas": len(evs),
+            "valor_pago": round(sum(e["valor"] for e in evs
+                                    if e["natureza"] == "PAGO"), 2),
+            "valor_juros": round(sum(e["valor"] for e in evs
+                                     if e["natureza"] == "JUROS"), 2),
+            "valor_abatido": round(sum(e["valor"] for e in evs
+                                       if e["natureza"] == "ABATIDO"), 2),
+            "valor_baixa_contabil": round(sum(e["valor"] for e in evs
+                                              if e["natureza"] == "BAIXA CONTABIL"), 2),
+            "valor_outro": round(sum(e["valor"] for e in evs
+                                     if e["natureza"].startswith("OUTRO")), 2),
+            "data_primeira_baixa": min((e["data_baixa"] for e in evs), default=None),
+            "motivos": " | ".join(sorted({str(e["motivo"]) for e in evs
+                                          if e["motivo"]}))[:200],
+            "cliente_em_acordo": cod in em_acordo,
+        })
+
+    tot = lambda k: round(sum(l[k] for l in linhas), 2)
+    print(f"\nAUDITORIA — {c.id_campanha}, {len(linhas)} título(s) "
+          f"desde {c.data_envio:%d/%m}\n")
+    for est, n in sorted(resumo.items(), key=lambda x: -x[1]):
+        print(f"   {est:<22} {n:>4}")
+    print(f"\n   principal pago     R$ {tot('valor_pago'):>12,.2f}  <- entrou")
+    if tot("valor_juros"):
+        print(f"   juros recebidos    R$ {tot('valor_juros'):>12,.2f}  <- entrou")
+        print(f"   TOTAL RECEBIDO     R$ "
+              f"{tot('valor_pago') + tot('valor_juros'):>12,.2f}")
+    for k, rot in (("valor_abatido","abatido"),
+                   ("valor_baixa_contabil","baixa contábil"),
+                   ("valor_outro","outro portador")):
+        if tot(k):
+            print(f"   {rot:<18} R$ {tot(k):>12,.2f}  <- NÃO entrou")
+
+    if escrever:
+        io.escrever_aba(p1, "Campanha_Auditoria", pd.DataFrame(linhas))
+    return {"linhas": linhas, "resumo": resumo}
+
+
 def resumo_campanhas(gc):
     """Uma linha por campanha, com as fases pivotadas em colunas.
 
@@ -726,8 +879,8 @@ def registrar(gc, c, fase: str, **metricas):
 
 
 def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
-               dias_uso: int = 90, escrever: bool = True,
-               campanha=None) -> list:
+               meses_ano_corrente_min: int = 2, dias_uso: int = 90,
+               escrever: bool = True, campanha=None) -> list:
     """Aplica a REGRA DE BLOQUEIO e escreve a Campanha_Input.
 
         deve a X frequência  E  tem uso recente  ->  entra na régua
@@ -891,8 +1044,17 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
                 print(f"   {r.codigo} {str(r.cliente)[:30]:<30} "
                       f"[{via}] {motivo_de.get(chave, '')}")
 
+    # Pelo menos N meses vencidos DESTE ANO. Quem não atinge sai da régua e vai
+    # para a Triagem_Divida_Antiga: a dívida existe, mas bloquear equipamento
+    # por resíduo de anos anteriores é outra conversa, e é a que o comercial
+    # contesta com mais razão.
+    do_ano = df.meses_ano_corrente.fillna(0).astype(int) >= meses_ano_corrente_min
     qualificado = ((df.frequencia >= freq_minima)
-                   & (df.frequencia_propria >= freq_propria_minima))
+                   & (df.frequencia_propria >= freq_propria_minima)
+                   & do_ano)
+    so_divida_antiga = df[(df.frequencia >= freq_minima)
+                          & (df.frequencia_propria >= freq_propria_minima)
+                          & ~do_ano]
     # Acordos: quem está pagando sai; quem QUEBROU fica e é marcado.
     # Sem este cruzamento, o disparo manda aviso de bloqueio para cliente que
     # está honrando um acordo — o pior erro possível numa régua de cobrança.
@@ -939,6 +1101,12 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     if len(so_pelo_grupo):
         print(f"  {len(so_pelo_grupo)} fora por frequência própria baixa "
               f"(entrariam só pelo grupo)")
+    if len(so_divida_antiga):
+        print(f"  {len(so_divida_antiga)} fora por ter menos de "
+              f"{meses_ano_corrente_min} mês(es) vencido(s) em "
+              f"{__import__('datetime').date.today():%Y} "
+              f"(R$ {so_divida_antiga.em_atraso.astype(float).sum():,.2f}) "
+              f"-> '{ABA_TRIAGEM_ANTIGA}'")
     print(f"  entram na régua (uso em {dias_uso}d): {len(dentro)} · "
           f"R$ {dentro.em_atraso.sum():,.2f}")
     if len(sem_uso):
@@ -966,7 +1134,9 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
             fora_juridico=n_fora_juridico,
             fora_excecoes=n_fora_excecoes,
             fora_acordo=n_fora_acordo,
+            meses_ano_corrente_min=meses_ano_corrente_min,
             passou_frequencia=int(qualificado.sum()),
+            fora_divida_antiga=len(so_divida_antiga),
             fora_freq_propria=len(so_pelo_grupo),
             sem_alocacao=len(sem_uso),
             entram=len(dentro),
@@ -981,6 +1151,7 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
         saida.insert(0, "acao", "")          # em branco = entra
         io.escrever_aba(p1, ABA_INPUT, saida)
         io.escrever_aba(p1, ABA_TRIAGEM_REGRA, sem_uso)
+        io.escrever_aba(p1, ABA_TRIAGEM_ANTIGA, so_divida_antiga)
         print(f"\n'{ABA_INPUT}': {len(saida)} candidato(s). Preencha `acao` "
               f"só para EXCLUIR alguém, com o motivo.")
 
