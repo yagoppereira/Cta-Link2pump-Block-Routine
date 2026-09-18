@@ -1228,10 +1228,26 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     # por resíduo de anos anteriores é outra conversa, e é a que o comercial
     # contesta com mais razão.
     do_ano = df.meses_ano_corrente.fillna(0).astype(int) >= meses_ano_corrente_min
-    qualificado = ((df.frequencia >= freq_minima)
+
+    # O critério de GRUPO só se aplica a quem TEM grupo.
+    #
+    # `freq_minima` mede o grupo; `freq_propria_minima` mede o cadastro. Para
+    # cadastro único os dois olham o mesmo número, e o de grupo, sendo maior,
+    # engolia o outro: na prática quem não tinha grupo precisava de 4 meses e
+    # quem tinha precisava de 3. Leonardo Leal Lopes, R$ 40.415 vencidos, 3
+    # meses todos de 2026, abastecendo hoje, ficava de fora por isso.
+    #
+    # Medido: 7 clientes e R$ 62.088,50 barrados só por essa assimetria.
+    tem_grupo = df.cadastros_com_bomba.fillna(1).astype(int) > 1
+    passou_grupo = (~tem_grupo) | (df.frequencia >= freq_minima)
+
+    qualificado = (passou_grupo
                    & (df.frequencia_propria >= freq_propria_minima)
                    & do_ano)
-    so_divida_antiga = df[(df.frequencia >= freq_minima)
+    so_por_cadastro_unico = df[(~tem_grupo) & (df.frequencia < freq_minima)
+                               & (df.frequencia_propria >= freq_propria_minima)
+                               & do_ano]
+    so_divida_antiga = df[passou_grupo
                           & (df.frequencia_propria >= freq_propria_minima)
                           & ~do_ano]
     # Acordos: quem está pagando sai; quem QUEBROU fica e é marcado.
@@ -1271,7 +1287,7 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
                 & (df.usa_equipamento == True)]
     sem_uso = df[qualificado.reindex(df.index, fill_value=False)
                  & (df.usa_equipamento.isna())]
-    so_pelo_grupo = df[(df.frequencia >= freq_minima)
+    so_pelo_grupo = df[passou_grupo
                        & (df.frequencia_propria < freq_propria_minima)]
 
     print(f"{len(df)} cliente(s) com dívida | grupo >= {freq_minima}: "
@@ -1280,6 +1296,10 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     if len(so_pelo_grupo):
         print(f"  {len(so_pelo_grupo)} fora por frequência própria baixa "
               f"(entrariam só pelo grupo)")
+    if len(so_por_cadastro_unico):
+        print(f"  {len(so_por_cadastro_unico)} entram por CADASTRO ÚNICO "
+              f"(sem grupo, o critério de grupo não se aplica): "
+              f"R$ {so_por_cadastro_unico.em_atraso.astype(float).sum():,.2f}")
     if len(so_divida_antiga):
         print(f"  {len(so_divida_antiga)} fora por ter menos de "
               f"{meses_ano_corrente_min} mês(es) vencido(s) em "
