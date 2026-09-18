@@ -571,16 +571,21 @@ def _norm_nome(v) -> str:
 
 
 def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
-    """Um quadro por gerente: quais clientes da equipe dele entraram e POR QUÊ.
+    """Quadro por gerente: quem entrou, POR QUÊ, e quem você vetou.
 
-    O "por quê" é a parte que importa. Listar nomes convida o gerente a
-    contestar em bloco; mostrar frequência, quanto do atraso é deste ano,
-    valor e último abastecimento faz a conversa ser caso a caso — e alguns
-    casos ele vai contestar com razão, que é o objetivo.
+    Duas fontes, de propósito:
+      Campanha_Previa  -> quem entrou de fato
+      Campanha_Input   -> TODOS os candidatos, inclusive os vetados na `acao`
 
-    O mapeamento vendedor -> gerente mora na aba Gerentes. Vendedor sem
-    mapeamento cai no GERENTE_PADRAO e sai marcado, para ninguém sumir do
-    relatório por falta de cadastro.
+    Mostrar os vetados junto é o que torna o relatório defensável. Sem eles o
+    gerente vê só a lista do que foi cobrado e não sabe que a régua também
+    poupou clientes da equipe dele — nem por qual motivo. Com eles, a conversa
+    deixa de ser "por que cobraram fulano" e passa a ser sobre o critério.
+
+    O vendedor dos vetados vem da Contatos_Emails: eles não passaram pelo
+    preparar(), que é quem normalmente resolve isso.
+
+    escrever=False roda como PRÉVIA — imprime e não toca na planilha.
     """
     import pandas as pd
 
@@ -593,111 +598,133 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
             mapa[v] = g
     if not mapa:
         mapa = {_norm_nome(k): v for k, v in GERENTES_INICIAIS.items()}
-        io.escrever_aba(p1, ABA_GERENTES, pd.DataFrame(
-            [{"vendedor": k, "gerente": v} for k, v in GERENTES_INICIAIS.items()]))
-        print(f"  '{ABA_GERENTES}' criada com {len(mapa)} vendedor(es). "
-              f"Acrescente os demais lá; o resto cai em '{GERENTE_PADRAO}'.")
+        if escrever:
+            io.escrever_aba(p1, ABA_GERENTES, pd.DataFrame(
+                [{"vendedor": k, "gerente": v} for k, v in GERENTES_INICIAIS.items()]))
+            print(f"  '{ABA_GERENTES}' criada. Acrescente os demais; o resto "
+                  f"cai em '{GERENTE_PADRAO}'.")
 
-    def _da_campanha(aba):
-        return [l for l in io.ler_aba(p1, aba, obrigatoria=False)
-                if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+    vendedor_de = {_codigo(l.get("codigo_cliente")): str(l.get("vendedor") or "").strip()
+                   for l in io.ler_aba(p1, ABA_CONTATOS, obrigatoria=False)
+                   if str(l.get("vendedor") or "").strip()}
 
-    previa = _da_campanha(ABA_PREVIA)
-    if not previa:
-        raise RuntimeError(f"Nada congelado para {c.id_campanha}.")
+    previa = {_codigo(l.get("codigo_cliente")): l
+              for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
+              if str(l.get("id_campanha") or "").strip() == c.id_campanha}
+    entrada = {_codigo(l.get("codigo") or l.get("codigo_cliente")): l
+               for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False)}
+    if not previa and not entrada:
+        raise RuntimeError(f"Nem '{ABA_PREVIA}' nem '{ABA_INPUT}' têm dados.")
 
-    # Evidência da régua (Campanha_Input) e desfecho (Campanha_Auditoria).
-    regua = {_codigo(l.get("codigo") or l.get("codigo_cliente")): l
-             for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False)}
     desfecho = {}
-    for l in _da_campanha("Campanha_Auditoria"):
-        cod = _codigo(l.get("codigo_cliente"))
-        d = desfecho.setdefault(cod, {"estados": set(), "pago": 0.0,
-                                      "juros": 0.0, "outro": 0.0})
+    for l in io.ler_aba(p1, "Campanha_Auditoria", obrigatoria=False):
+        if str(l.get("id_campanha") or "").strip() != c.id_campanha:
+            continue
+        d = desfecho.setdefault(_codigo(l.get("codigo_cliente")),
+                                {"estados": set(), "recebido": 0.0})
         d["estados"].add(str(l.get("estado") or ""))
-        d["pago"] += _numero_br(l.get("valor_pago"))
-        d["juros"] += _numero_br(l.get("valor_juros"))
-        d["outro"] += (_numero_br(l.get("valor_abatido"))
-                       + _numero_br(l.get("valor_baixa_contabil"))
-                       + _numero_br(l.get("valor_outro")))
+        d["recebido"] += _numero_br(l.get("valor_pago")) + _numero_br(l.get("valor_juros"))
+
+    def _desde(v):
+        t = str(v or "").strip()[:10]
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", t)
+        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}" if m else t
+
+    def _resultado(cod):
+        e = desfecho.get(cod, {}).get("estados", set())
+        if "PAGO" in e: return "PAGOU"
+        if any("ACORDADO" in x for x in e): return "NEGOCIOU"
+        if any("X50" in x for x in e): return "UNIFICOU"
+        if any("BAIXA" in x for x in e): return "baixa contábil"
+        if any("ABATIDO" in x for x in e): return "abatido"
+        return "sem movimento" if e else ""
 
     linhas = []
-    for cli in previa:
-        cod = _codigo(cli.get("codigo_cliente"))
-        r = regua.get(cod, {})
-        d = desfecho.get(cod, {})
-        vend = str(cli.get("vendedor") or "").strip()
-        ger = mapa.get(_norm_nome(vend), GERENTE_PADRAO)
-
-        freq = r.get("frequencia") or ""
-        propria = r.get("frequencia_propria") or ""
-        ano = r.get("meses_ano_corrente") or ""
-        uso = r.get("ultima_utilizacao") or ""
+    for cod in sorted(set(previa) | set(entrada)):
+        r = entrada.get(cod, {})
+        p = previa.get(cod, {})
+        veto = str(r.get("acao") or "").strip()
+        vend = (str(p.get("vendedor") or "").strip()
+                or vendedor_de.get(cod, "") or "(sem vendedor)")
 
         motivo = []
-        if propria:
-            motivo.append(f"{propria} mês(es) vencido(s)"
-                          + (f", {ano} em {c.data_envio:%Y}" if ano != "" else ""))
-        if freq and str(freq) != str(propria):
-            motivo.append(f"grupo com {freq}")
-        if uso:
-            motivo.append(f"abasteceu em {uso}")
-
-        estados = d.get("estados", set())
-        if "PAGO" in estados:
-            resultado = "PAGOU"
-        elif any("ACORDADO" in e for e in estados):
-            resultado = "NEGOCIOU"
-        elif any("X50" in e for e in estados):
-            resultado = "UNIFICOU (prazo novo)"
-        elif any("BAIXA" in e for e in estados):
-            resultado = "baixa contábil"
-        elif any("ABATIDO" in e for e in estados):
-            resultado = "abatido"
-        elif estados:
-            resultado = "sem movimento"
-        else:
-            resultado = ""
+        if r.get("frequencia_propria"):
+            motivo.append(f"{r['frequencia_propria']} mês(es) vencido(s)")
+            if str(r.get("meses_ano_corrente") or "") != "":
+                motivo[-1] += f", {r['meses_ano_corrente']} em {c.data_envio:%Y}"
+        if r.get("frequencia") and str(r["frequencia"]) != str(r.get("frequencia_propria")):
+            motivo.append(f"grupo com {r['frequencia']}")
+        if r.get("vencimento_mais_antigo"):
+            motivo.append(f"devendo desde {_desde(r['vencimento_mais_antigo'])}")
+        if r.get("ultima_utilizacao"):
+            motivo.append(f"abasteceu em {_desde(r['ultima_utilizacao'])}")
 
         linhas.append({
-            "gerente": ger,
-            "vendedor": vend or "(sem vendedor)",
+            "gerente": mapa.get(_norm_nome(vend), GERENTE_PADRAO),
+            "vendedor": vend,
             "sem_mapeamento": _norm_nome(vend) not in mapa,
             "codigo_cliente": cod,
-            "cliente": cli.get("nome_cliente"),
-            "cobrado": _numero_br(cli.get("total")),
-            "titulos": cli.get("titulos"),
-            "por_que_entrou": "; ".join(motivo) or "(sem evidência na régua)",
-            "resultado": resultado,
-            "pago": round(d.get("pago", 0) + d.get("juros", 0), 2),
+            "cliente": p.get("nome_cliente") or r.get("cliente"),
+            "situacao": "VETADO" if veto else ("cobrado" if cod in previa
+                                               else "fora da régua"),
+            "motivo_veto": veto,
+            "devendo_desde": _desde(r.get("vencimento_mais_antigo")),
+            "titulos": p.get("titulos") or r.get("titulos_abertos") or "",
+            "total": _numero_br(p.get("total")) or _numero_br(r.get("em_atraso")),
+            "por_que_entrou": "; ".join(motivo) or "(sem evidência)",
+            "resultado": _resultado(cod),
+            "recebido": round(desfecho.get(cod, {}).get("recebido", 0.0), 2),
             "id_campanha": c.id_campanha,
         })
 
-    linhas.sort(key=lambda l: (l["gerente"], l["vendedor"], -l["cobrado"]))
+    linhas.sort(key=lambda l: (l["gerente"], l["vendedor"], -l["total"]))
+
+    print(f"\n{'#'*74}\n#  RELATÓRIO DE BLOQUEIOS — campanha {c.id_campanha}")
+    print(f"#  aviso em {c.data_envio:%d/%m/%Y}, prazo até {c.data_limite:%d/%m/%Y}")
+    if not escrever:
+        print(f"#  PRÉVIA — nada foi escrito na planilha")
+    print("#" * 74)
 
     for ger in sorted({l["gerente"] for l in linhas}):
         dele = [l for l in linhas if l["gerente"] == ger]
-        tot = sum(l["cobrado"] for l in dele)
-        pg = sum(l["pago"] for l in dele)
-        print(f"\n{'='*72}\n{ger} — {len(dele)} cliente(s), R$ {tot:,.2f} cobrados"
-              + (f", R$ {pg:,.2f} pagos" if pg else ""))
+        cobrados = [l for l in dele if l["situacao"] == "cobrado"]
+        vetados = [l for l in dele if l["situacao"] == "VETADO"]
+        tot = sum(l["total"] for l in cobrados)
+        rec = sum(l["recebido"] for l in cobrados)
+
+        print(f"\n\n{'='*74}\n{ger.upper()}")
+        print(f"{len(cobrados)} cliente(s) cobrado(s), R$ {tot:,.2f}"
+              + (f"  ·  R$ {rec:,.2f} recebidos" if rec else "")
+              + (f"  ·  {len(vetados)} vetado(s)" if vetados else ""))
+
         vend_ant = None
-        for l in dele:
+        for l in cobrados:
             if l["vendedor"] != vend_ant:
                 print(f"\n  {l['vendedor']}")
                 vend_ant = l["vendedor"]
-            res = f"  [{l['resultado']}]" if l["resultado"] else ""
-            print(f"     {str(l['cliente'])[:38]:<38} R$ {l['cobrado']:>10,.2f}{res}")
-            print(f"        {l['por_que_entrou']}")
+            res = f"   [{l['resultado']}]" if l["resultado"] else ""
+            print(f"    {str(l['cliente'])[:40]:<40} R$ {l['total']:>10,.2f}"
+                  f"  {l['titulos']:>3} tít.{res}")
+            print(f"       {l['por_que_entrou']}")
+
+        if vetados:
+            print(f"\n  --- NÃO cobrados, retirados por decisão ---")
+            for l in vetados:
+                print(f"    {str(l['cliente'])[:40]:<40} R$ {l['total']:>10,.2f}"
+                      f"   ({l['vendedor']})")
+                print(f"       motivo: {l['motivo_veto']}")
+                print(f"       entraria por: {l['por_que_entrou']}")
 
     sem_mapa = sorted({l["vendedor"] for l in linhas if l["sem_mapeamento"]})
     if sem_mapa:
-        print(f"\n  {len(sem_mapa)} vendedor(es) sem gerente na aba "
-              f"'{ABA_GERENTES}', caíram em {GERENTE_PADRAO}:")
-        print(f"     {', '.join(sem_mapa)}")
+        print(f"\n\n  vendedor(es) sem gerente em '{ABA_GERENTES}', "
+              f"caíram em {GERENTE_PADRAO}:\n     {', '.join(sem_mapa)}")
 
     if escrever:
         io.escrever_aba(p1, ABA_RESUMO_GERENTE, pd.DataFrame(linhas))
+    else:
+        print(f"\n  (prévia — rode com escrever=True para gravar "
+              f"em '{ABA_RESUMO_GERENTE}')")
     return {"linhas": linhas}
 
 
