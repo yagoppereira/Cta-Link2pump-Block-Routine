@@ -1646,6 +1646,15 @@ ABA_CONFERENCIA = "Campanha_Conferencia"
 
 
 def conferir_titulos(c, gc, bq, escrever: bool = True) -> dict:
+    """APOSENTADA — use auditar_titulos().
+
+    Comparava saldo antes e depois, e por isso não distingue pagamento de
+    baixa contábil, abatimento ou unificação: as quatro reduzem saldo e
+    apareciam como quitação. Foi o que produziu "268 de 268 quitados".
+
+    Mantida só para leitura de campanhas antigas. Não é mais chamada pelo
+    reconciliar, e a aba Campanha_Conferencia pode ser apagada.
+    """
     """Confere TÍTULO A TÍTULO o que mudou desde o aviso.
 
     A reconciliação compara saldo somado por cliente, e isso confunde três
@@ -1834,24 +1843,38 @@ def reconciliar(c, gc, bq) -> dict:
         print(f"renegociaram depois do aviso: {len(renegociaram)} "
               f"({', '.join(renegociaram[:8])}{'...' if len(renegociaram) > 8 else ''})")
 
-    # Conferência TÍTULO A TÍTULO, não a contagem líquida. tit_antes - tit_hoje
-    # erra quando o cliente quita antigos e novos vencem no prazo.
-    conf = conferir_titulos(c, gc, bq)
-    cont = conf.get("contagem", {})
+    # AUDITORIA, não conferência. As duas respondiam a mesma pergunta com
+    # números diferentes: a conferência compara saldo antes/depois e não
+    # distingue pagamento de baixa contábil — foi ela que reportou 268 de 268
+    # quitados. A auditoria segue os lançamentos de baixa e separa pago,
+    # juros, abatido, unificado e write-off.
+    #
+    # Manter as duas era ter duas versões do mesmo fato na planilha, que é o
+    # erro que este projeto passou semanas corrigindo em outros lugares.
+    aud = auditar_titulos(c, gc, bq)
+    cont = {}
+    for l in aud.get("linhas", []):
+        cont[l["estado"]] = cont.get(l["estado"], 0) + 1
 
     registrar(gc, c, "reconciliado",
               quitou=len(quitou), pagou_parcial=len(parcial),
               mantem_bloqueio=len(mantem),
               valor_recuperado=recuperado,
               titulos_no_aviso=tit_antes,
-              titulos_quitados=cont.get("QUITADO", 0),
-              titulos_reduzidos=cont.get("REDUZIDO", 0),
-              titulos_inalterados=cont.get("INALTERADO", 0),
-              titulos_viraram_x90=cont.get("X90", 0),
+              titulos_pagos=cont.get("PAGO", 0),
+              titulos_acordados=sum(v for k, v in cont.items() if "ACORDADO" in k),
+              titulos_sem_movimento=cont.get("SEM MOVIMENTO", 0),
+              titulos_baixa_contabil=cont.get("BAIXA CONTABIL", 0),
+              titulos_abatidos=cont.get("ABATIDO", 0),
+              titulos_unificados=sum(v for k, v in cont.items() if "X50" in k),
               # "pago de verdade" exclui o que só virou baixa contábil. No
               # agregado por cliente, X90 parece quitação e infla a recuperação.
-              valor_pago_titulos=conf.get("pago", 0.0),
-              valor_virou_x90=conf.get("virou_x90", 0.0),
+              valor_pago_titulos=round(sum(l["valor_pago"] + l["valor_juros"]
+                                           for l in aud.get("linhas", [])), 2),
+              valor_nao_entrou=round(sum(l["valor_abatido"]
+                                         + l["valor_baixa_contabil"]
+                                         + l["valor_outro"]
+                                         for l in aud.get("linhas", [])), 2),
               renegociaram=len(renegociaram))
     return {"quitou": quitou, "parcial": parcial, "mantem": mantem,
             "renegociaram": renegociaram}
