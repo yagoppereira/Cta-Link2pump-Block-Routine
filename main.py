@@ -549,6 +549,158 @@ def auditar_titulos(c, gc, bq, escrever: bool = True) -> dict:
     return {"linhas": linhas, "resumo": resumo}
 
 
+ABA_GERENTES = "Gerentes"
+ABA_RESUMO_GERENTE = "Resumo_Gerentes"
+
+# Usado só para CRIAR a aba na primeira vez. Depois disso a aba manda, porque
+# vendedor troca de gerente e ninguém vai abrir um .py para registrar isso.
+GERENTES_INICIAIS = {
+    "MARLON SILVA": "Carlão",
+    "PATRICK RIBEIRO": "Meneghini",
+    "VIVIAN OLIVEIRA": "Meneghini",
+    "GUILHERME PIO PIMENTA": "Meneghini",
+}
+GERENTE_PADRAO = "João Pedro"
+
+
+def _norm_nome(v) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(v or ""))
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", t).strip().upper()
+
+
+def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
+    """Um quadro por gerente: quais clientes da equipe dele entraram e POR QUÊ.
+
+    O "por quê" é a parte que importa. Listar nomes convida o gerente a
+    contestar em bloco; mostrar frequência, quanto do atraso é deste ano,
+    valor e último abastecimento faz a conversa ser caso a caso — e alguns
+    casos ele vai contestar com razão, que é o objetivo.
+
+    O mapeamento vendedor -> gerente mora na aba Gerentes. Vendedor sem
+    mapeamento cai no GERENTE_PADRAO e sai marcado, para ninguém sumir do
+    relatório por falta de cadastro.
+    """
+    import pandas as pd
+
+    p1 = io.abrir(gc, ID_DESTINO)
+
+    mapa = {}
+    for l in io.ler_aba(p1, ABA_GERENTES, obrigatoria=False):
+        v, g = _norm_nome(l.get("vendedor")), str(l.get("gerente") or "").strip()
+        if v and g:
+            mapa[v] = g
+    if not mapa:
+        mapa = {_norm_nome(k): v for k, v in GERENTES_INICIAIS.items()}
+        io.escrever_aba(p1, ABA_GERENTES, pd.DataFrame(
+            [{"vendedor": k, "gerente": v} for k, v in GERENTES_INICIAIS.items()]))
+        print(f"  '{ABA_GERENTES}' criada com {len(mapa)} vendedor(es). "
+              f"Acrescente os demais lá; o resto cai em '{GERENTE_PADRAO}'.")
+
+    def _da_campanha(aba):
+        return [l for l in io.ler_aba(p1, aba, obrigatoria=False)
+                if str(l.get("id_campanha") or "").strip() == c.id_campanha]
+
+    previa = _da_campanha(ABA_PREVIA)
+    if not previa:
+        raise RuntimeError(f"Nada congelado para {c.id_campanha}.")
+
+    # Evidência da régua (Campanha_Input) e desfecho (Campanha_Auditoria).
+    regua = {_codigo(l.get("codigo") or l.get("codigo_cliente")): l
+             for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False)}
+    desfecho = {}
+    for l in _da_campanha("Campanha_Auditoria"):
+        cod = _codigo(l.get("codigo_cliente"))
+        d = desfecho.setdefault(cod, {"estados": set(), "pago": 0.0,
+                                      "juros": 0.0, "outro": 0.0})
+        d["estados"].add(str(l.get("estado") or ""))
+        d["pago"] += _numero_br(l.get("valor_pago"))
+        d["juros"] += _numero_br(l.get("valor_juros"))
+        d["outro"] += (_numero_br(l.get("valor_abatido"))
+                       + _numero_br(l.get("valor_baixa_contabil"))
+                       + _numero_br(l.get("valor_outro")))
+
+    linhas = []
+    for cli in previa:
+        cod = _codigo(cli.get("codigo_cliente"))
+        r = regua.get(cod, {})
+        d = desfecho.get(cod, {})
+        vend = str(cli.get("vendedor") or "").strip()
+        ger = mapa.get(_norm_nome(vend), GERENTE_PADRAO)
+
+        freq = r.get("frequencia") or ""
+        propria = r.get("frequencia_propria") or ""
+        ano = r.get("meses_ano_corrente") or ""
+        uso = r.get("ultima_utilizacao") or ""
+
+        motivo = []
+        if propria:
+            motivo.append(f"{propria} mês(es) vencido(s)"
+                          + (f", {ano} em {c.data_envio:%Y}" if ano != "" else ""))
+        if freq and str(freq) != str(propria):
+            motivo.append(f"grupo com {freq}")
+        if uso:
+            motivo.append(f"abasteceu em {uso}")
+
+        estados = d.get("estados", set())
+        if "PAGO" in estados:
+            resultado = "PAGOU"
+        elif any("ACORDADO" in e for e in estados):
+            resultado = "NEGOCIOU"
+        elif any("X50" in e for e in estados):
+            resultado = "UNIFICOU (prazo novo)"
+        elif any("BAIXA" in e for e in estados):
+            resultado = "baixa contábil"
+        elif any("ABATIDO" in e for e in estados):
+            resultado = "abatido"
+        elif estados:
+            resultado = "sem movimento"
+        else:
+            resultado = ""
+
+        linhas.append({
+            "gerente": ger,
+            "vendedor": vend or "(sem vendedor)",
+            "sem_mapeamento": _norm_nome(vend) not in mapa,
+            "codigo_cliente": cod,
+            "cliente": cli.get("nome_cliente"),
+            "cobrado": _numero_br(cli.get("total")),
+            "titulos": cli.get("titulos"),
+            "por_que_entrou": "; ".join(motivo) or "(sem evidência na régua)",
+            "resultado": resultado,
+            "pago": round(d.get("pago", 0) + d.get("juros", 0), 2),
+            "id_campanha": c.id_campanha,
+        })
+
+    linhas.sort(key=lambda l: (l["gerente"], l["vendedor"], -l["cobrado"]))
+
+    for ger in sorted({l["gerente"] for l in linhas}):
+        dele = [l for l in linhas if l["gerente"] == ger]
+        tot = sum(l["cobrado"] for l in dele)
+        pg = sum(l["pago"] for l in dele)
+        print(f"\n{'='*72}\n{ger} — {len(dele)} cliente(s), R$ {tot:,.2f} cobrados"
+              + (f", R$ {pg:,.2f} pagos" if pg else ""))
+        vend_ant = None
+        for l in dele:
+            if l["vendedor"] != vend_ant:
+                print(f"\n  {l['vendedor']}")
+                vend_ant = l["vendedor"]
+            res = f"  [{l['resultado']}]" if l["resultado"] else ""
+            print(f"     {str(l['cliente'])[:38]:<38} R$ {l['cobrado']:>10,.2f}{res}")
+            print(f"        {l['por_que_entrou']}")
+
+    sem_mapa = sorted({l["vendedor"] for l in linhas if l["sem_mapeamento"]})
+    if sem_mapa:
+        print(f"\n  {len(sem_mapa)} vendedor(es) sem gerente na aba "
+              f"'{ABA_GERENTES}', caíram em {GERENTE_PADRAO}:")
+        print(f"     {', '.join(sem_mapa)}")
+
+    if escrever:
+        io.escrever_aba(p1, ABA_RESUMO_GERENTE, pd.DataFrame(linhas))
+    return {"linhas": linhas}
+
+
 def resumo_campanhas(gc):
     """Uma linha por campanha, com as fases pivotadas em colunas.
 
