@@ -252,33 +252,72 @@ def _dia_util(d, bq=None):
 
 def nova_campanha(gc, bq=None, prazo_dias: int = 13, data_envio=None,
                   copia_padrao=("contato.financeiro@ctasmart.com.br",),
-                  teto_diario: int = 450) -> "campanha_v2.Campanha":
-    """Monta a campanha do dia sem você digitar id nem datas.
+                  teto_diario: int = 450,
+                  forcar_nova: bool = False) -> "campanha_v2.Campanha":
+    """Abre a campanha do dia, ou REAPROVEITA a que ainda não foi disparada.
 
-        data_envio  = hoje (é o dia em que você roda; é também a âncora do
-                      cálculo de encargos, então inventar outra data produziria
-                      juros que não correspondem à posição informada)
-        id_campanha = derivado do registro: 2026-09-A, -B, -C...
+    O que define uma campanha é o E-MAIL QUE SAIU. Antes o id era consumido na
+    régua: `candidatos(campanha=c)` gravava a linha `regua` no registro e o
+    próximo id avançava. Calibrar a régua três vezes queimava -C, -D e -E sem
+    nada ter sido enviado, e a numeração deixava de descrever a realidade.
+
+    Agora só campanha DISPARADA encerra um id. Enquanto não houver envio em
+    produção, rodar isto devolve a mesma campanha — a régua e o preparar podem
+    ser refeitos à vontade.
+
+        data_envio  = hoje, e é a âncora do cálculo de encargos. Se a campanha
+                      reaproveitada já tem prévia CONGELADA, a data original é
+                      preservada: recalcular mudaria valores já congelados.
         data_limite = data_envio + prazo_dias, empurrado para dia útil
 
-    Imprime o que decidiu. Se algo não fizer sentido, monte a Campanha à mão —
-    o construtor continua aberto.
+    forcar_nova=True abre outra mesmo havendo rascunho — para rodar duas
+    campanhas em paralelo de propósito.
     """
     from datetime import date, timedelta
 
     envio_em = data_envio or date.today()
     p1 = io.abrir(gc, ID_DESTINO)
 
-    # Três fontes de id já usado, não só o registro. Limpar o Campanha_Log
-    # fazia o id voltar para -A enquanto a prévia congelada era -B: a campanha
-    # nova nascia com o nome de outra e o painel não achava nada.
     registro = io.ler_aba(p1, ABA_CAMPANHAS, obrigatoria=False)
-    registro = (list(registro)
-                + list(io.ler_aba(p1, ABA_PREVIA, obrigatoria=False))
-                + list(io.ler_aba(p1, ABA_LOG, obrigatoria=False)))
+    previa = io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
+    log = io.ler_aba(p1, ABA_LOG, obrigatoria=False)
 
-    id_campanha = _proximo_id(registro, envio_em)
-    limite = _dia_util(envio_em + timedelta(days=prazo_dias), bq)
+    def _ids(linhas):
+        return {str(l.get("id_campanha") or "").strip() for l in linhas} - {""}
+
+    # DISPARADA = e-mail de produção saiu. É o que encerra o id.
+    disparadas = {str(l.get("id_campanha") or "").strip() for l in log
+                  if str(l.get("status") or "").upper() == "ENVIADO"
+                  and str(l.get("modo") or "PRODUCAO").upper() == "PRODUCAO"}
+    disparadas |= {str(l.get("id_campanha") or "").strip() for l in registro
+                   if str(l.get("fase") or "").startswith("disparado")}
+    disparadas -= {""}
+
+    rascunhos = sorted((_ids(registro) | _ids(previa)) - disparadas)
+
+    if rascunhos and not forcar_nova:
+        id_campanha = rascunhos[-1]
+        congelada = [l for l in previa
+                     if str(l.get("id_campanha") or "").strip() == id_campanha]
+
+        if congelada and str(congelada[0].get("data_envio") or "").strip():
+            # Prévia congelada manda: os encargos foram calculados naquela data.
+            a, m, d = str(congelada[0]["data_envio"]).strip()[:10].split("-")
+            envio_em = date(int(a), int(m), int(d))
+            lim = str(congelada[0].get("data_limite") or "").strip()[:10]
+            limite = (date(*map(int, lim.split("-"))) if lim
+                      else _dia_util(envio_em + timedelta(days=prazo_dias), bq))
+            print(f"{id_campanha} REAPROVEITADA — já tem prévia congelada "
+                  f"({len(congelada)} cliente[s]); datas originais preservadas.")
+        else:
+            limite = _dia_util(envio_em + timedelta(days=prazo_dias), bq)
+            print(f"{id_campanha} REAPROVEITADA — existe no registro e nunca "
+                  f"foi disparada; datas atualizadas para hoje.")
+        print(f"  (para abrir outra assim mesmo: forcar_nova=True)")
+    else:
+        usados = _ids(registro) | _ids(previa) | _ids(log)
+        id_campanha = _proximo_id([{"id_campanha": i} for i in usados], envio_em)
+        limite = _dia_util(envio_em + timedelta(days=prazo_dias), bq)
 
     c = campanha_v2.Campanha(
         id_campanha=id_campanha,
@@ -291,14 +330,16 @@ def nova_campanha(gc, bq=None, prazo_dias: int = 13, data_envio=None,
           f"prazo até {limite:%d/%m/%Y} ({c.dias_de_prazo} dias)")
     if limite != envio_em + timedelta(days=prazo_dias):
         print(f"  (prazo empurrado para dia útil)")
-    if registro:
-        ult = registro[-1]
-        print(f"  anterior: {ult.get('id_campanha')} em "
-              f"{ult.get('data_envio')} — {ult.get('clientes')} cliente(s)")
+
+    if disparadas:
+        ult = sorted(disparadas)[-1]
+        fechada = [l for l in registro
+                   if str(l.get("id_campanha") or "").strip() == ult
+                   and str(l.get("clientes") or "").strip()]
+        quando = fechada[-1].get("data_envio") if fechada else "?"
+        quantos = fechada[-1].get("clientes") if fechada else "?"
+        print(f"  última disparada: {ult} em {quando} — {quantos} cliente(s)")
     return c
-
-
-ABA_PAINEL_CAMPANHAS = "Painel_Campanhas"
 
 
 def criar_painel_campanhas(gc):
