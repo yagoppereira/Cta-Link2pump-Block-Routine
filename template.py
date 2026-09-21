@@ -209,10 +209,31 @@ def quadro_equipamentos(bombas: list, nome_cliente: str) -> str:
                 if b.get("serial_equipamento") is not None})
     n_terceiro = sum(1 for b in bombas if b.get("instalada_em_terceiro"))
 
-    nota = (f'{len(bombas)} bomba(s) em {n_eq} equipamento(s).')
+    # ESCOPO DO BLOQUEIO, explícito. O quadro listava os equipamentos e não
+    # dizia o que aconteceria com eles: o cliente não sabia se pararia o
+    # sistema inteiro ou só as bombas listadas. São consequências muito
+    # diferentes, e ele precisa dessa informação para decidir.
+    adimplentes = max((int(float(b.get("bombas_de_adimplentes") or 0))
+                       for b in bombas), default=0)
+    so_bomba = adimplentes > 0
+
+    nota = (f'{len(bombas)} bomba(s) em {n_eq} equipamento(s). ')
+    nota += ('A suspensão alcançaria apenas os equipamentos listados acima; '
+             'os demais acessos permanecem ativos.' if so_bomba
+             else 'A suspensão alcançaria os equipamentos listados acima.')
+
+    # PAGANTE ≠ OPERADOR. Quem paga por bomba instalada em outra empresa
+    # precisa saber que a interrupção atinge um terceiro que não recebeu aviso
+    # nenhum — é informação que muda a urgência e que ele não tem como deduzir
+    # do quadro.
     if n_terceiro:
-        nota += (f' {n_terceiro} atende(m) operação de outra empresa, que não '
-                 f'foi notificada e também seria afetada.')
+        locais = sorted({str(b.get("local_nome") or "").strip()
+                         for b in bombas if b.get("instalada_em_terceiro")} - {""})
+        quem = ", ".join(locais) if locais else "outra empresa"
+        nota += (f' <strong>{n_terceiro} equipamento(s) atende(m) a operação '
+                 f'de {quem}</strong>, que consta como responsável pelo local '
+                 f'e não foi notificada — a interrupção afetaria essa operação '
+                 f'também.')
 
     return (
         '<p style="margin:20px 0 6px"><strong>Equipamentos vinculados ao seu '
@@ -544,8 +565,21 @@ def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
 
     linhas = []
     for l in itens:
-        extra = (f'<div style="font-size:11px;color:#b45309">retirado: '
-                 f'{l.get("motivo_veto")}</div>' if vetado else "")
+        if vetado:
+            # Só o motivo. O gestor não precisa da evidência da régua nem do
+            # parque de quem NÃO vai ser cobrado — precisa saber que saiu e
+            # por quê. Detalhe demais aqui competia com a lista que importa.
+            linhas.append(
+                f'<tr><td style="{td}"><strong>{l.get("cliente")}</strong>'
+                f'<div style="font-size:11px;color:#b45309">'
+                f'{l.get("motivo_veto") or "sem motivo registrado"}</div></td>'
+                f'<td style="{td};text-align:right;white-space:nowrap">'
+                f'{brl(float(l.get("total") or 0))}</td>'
+                f'<td style="{td};text-align:center;white-space:nowrap">'
+                f'{l.get("devendo_desde") or "—"}</td></tr>')
+            continue
+
+        extra = ""
 
         # Parque do cliente. O gestor pediu, e muda a leitura: 1 bomba parada
         # e 14 bombas paradas são conversas diferentes com o mesmo cliente.
@@ -571,9 +605,12 @@ def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
             extra += (f'<div style="font-size:11px;color:#b45309">'
                       f'em operação de terceiro: {l["em_terceiro"]}</div>')
         if l.get("sistema_com_adimplente"):
+            # Só o sinal. O gestor precisa saber que o bloqueio é restrito,
+            # não quantas bombas de terceiros existem no sistema — esse número
+            # é operacional e desloca a atenção do que ele decide.
             extra += (f'<div style="font-size:11px;color:#b45309">'
-                      f'sistema compartilhado com {l["sistema_com_adimplente"]} '
-                      f'bomba(s) de pagante em dia — bloqueio só da bomba</div>')
+                      f'acesso compartilhado — bloqueio exclusivamente da '
+                      f'bomba</div>')
         res = l.get("resultado") or ""
         marca = (f' <span style="font-size:11px;color:#059669">[{res}]</span>'
                  if res else "")
