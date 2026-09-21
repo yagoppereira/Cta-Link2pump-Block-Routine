@@ -551,11 +551,22 @@ def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
         # e 14 bombas paradas são conversas diferentes com o mesmo cliente.
         eq = l.get("equipamentos")
         if eq not in (None, "", 0):
-            seriais = str(l.get("seriais") or "")
-            curto = (seriais if len(seriais) <= 70 else seriais[:67] + "...")
-            extra += (f'<div style="font-size:11px;color:#374151;margin-top:3px">'
-                      f'{eq} equipamento(s)'
-                      + (f' — {curto}' if curto else "") + '</div>')
+            # Nome quando existe; serial só como reserva. Uma linha por
+            # equipamento, porque a lista corrida fica ilegível a partir de
+            # três — e o gestor lê isto para reconhecer a operação, não para
+            # conferir número.
+            nomes = str(l.get("equipamentos_nomes") or "").strip()
+            itens = [x.strip() for x in nomes.split(";") if x.strip()] or \
+                    [x.strip() for x in str(l.get("seriais") or "").split(";")
+                     if x.strip()]
+            lista = "".join(
+                f'<div style="font-size:11px;color:#374151">• {x}</div>'
+                for x in itens[:8])
+            if len(itens) > 8:
+                lista += (f'<div style="font-size:11px;color:#6b7280">'
+                          f'e mais {len(itens) - 8}</div>')
+            extra += (f'<div style="font-size:11px;color:#374151;margin-top:4px">'
+                      f'<strong>{eq} equipamento(s)</strong></div>{lista}')
         if l.get("em_terceiro"):
             extra += (f'<div style="font-size:11px;color:#b45309">'
                       f'em operação de terceiro: {l["em_terceiro"]}</div>')
