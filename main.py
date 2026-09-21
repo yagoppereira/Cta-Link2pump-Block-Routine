@@ -52,7 +52,8 @@ ID_DESTINO = "1KkE6_D_-xug1LSxQYJ9v5vjUtjK72uzawL0pBfC4h3A"      # planilha 1 (n
 # circuito: o cruzamento cliente<->vendedor dela já chega pronto na coluna
 # `vendedor` da Contatos_Emails. Mantido só como referência de onde o dado
 # nasce; o pipeline não abre mais essa planilha.
-ID_VENDEDORES = "1KSd7cdHUiotmE6WAePq0WnXzhLZz8vggwPkcn1ZGBv4"   # não usado
+ID_VENDEDORES = "1KSd7cdHUiotmE6WAePq0WnXzhLZz8vggwPkcn1ZGBv4"
+ABA_BASE_CLIENTES = "Base_Clientes"   # carteira vigente, mantida pelo comercial
 
 ABA_INPUT = "Campanha_Input"
 ABA_PREVIA = "Campanha_Previa"
@@ -64,6 +65,7 @@ ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
 ABA_TRIAGEM_ANTIGA = "Triagem_Divida_Antiga"
 ABA_EXCECOES = "Nunca_Notificar"
 ABA_CAMPANHAS = "Campanhas"
+ABA_PAINEL_CAMPANHAS = "Painel_Campanhas"
 ABA_EMAIL_VEND = "Email_Vendedores"
 ABA_CONTATOS = "Contatos_Emails"        # traz a coluna `vendedor` já resolvida
 
@@ -1561,9 +1563,24 @@ def preparar(c, gc, bq) -> dict:
     df_bmb.insert(0, "id_campanha", c.id_campanha)
 
     # --- vendedores: tudo na planilha 1. A Contatos_Emails já traz o
-    # cruzamento cliente<->vendedor pronto; join por codigo_cliente, nunca por
-    # cnpj_cpf (essa coluna virou número e perdeu zeros à esquerda).
+    # CARTEIRA vem da Base_Clientes (planilha 2), não da coluna `vendedor` da
+    # Contatos_Emails. Aquela coluna é o `representante` do CIGAM — cadastro
+    # antigo, não carteira — e foi de lá que saiu "MÁRIO LUCAS", colaborador
+    # de divisão 40 que nunca foi vendedor.
+    #
+    # Se a planilha 2 não abrir, segue com a fonte antiga e AVISA, em vez de
+    # derrubar a campanha: vendedor em cópia é acessório, não pode travar o
+    # aviso ao cliente.
+    base_clientes = []
+    try:
+        p2 = io.abrir(gc, ID_VENDEDORES)
+        base_clientes = io.ler_aba(p2, ABA_BASE_CLIENTES, obrigatoria=False)
+    except Exception as exc:
+        print(f"  AVISO: não abri a planilha 2 ({type(exc).__name__}). "
+              f"Vendedor virá da Contatos_Emails, que é fonte errada.")
+
     resv = vend.resolver_vendedores(
+        base_clientes=base_clientes,
         contatos_emails=io.ler_aba(p1, ABA_CONTATOS),
         email_vendedores=io.ler_aba(p1, ABA_EMAIL_VEND),
         codigos=codigos,
