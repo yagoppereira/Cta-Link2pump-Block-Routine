@@ -611,6 +611,33 @@ def _norm_nome(v) -> str:
     return re.sub(r"\s+", " ", t).strip().upper()
 
 
+def _mapa_gestores(p1):
+    """Lê vendedor -> (gerente, e-mail do gerente) da aba Email_Vendedores.
+
+    Ficava numa aba `Gerentes` separada, e isso duplicava cadastro: o vendedor
+    já mora na Email_Vendedores. Colunas esperadas:
+
+        Vendedor | Email | Ativo | Gerente | Email_Gerente
+
+    As duas últimas são novas. Sem elas nada quebra — o vendedor cai no
+    GERENTE_PADRAO e o gestor sem e-mail sai listado em vez de sumir.
+    """
+    mapa, emails = {}, {}
+    for l in io.ler_aba(p1, ABA_EMAIL_VEND, obrigatoria=False):
+        v = _norm_nome(l.get("vendedor") or l.get("Vendedor"))
+        g = str(l.get("gerente") or l.get("Gerente") or "").strip()
+        e = str(l.get("email_gerente") or l.get("Email_Gerente") or "").strip()
+        if v and g:
+            mapa[v] = g
+            if e and "@" in e:
+                emails[g] = e
+    if not mapa:
+        mapa = {_norm_nome(k): v for k, v in GERENTES_INICIAIS.items()}
+        print(f"  '{ABA_EMAIL_VEND}' sem coluna Gerente — usando o mapa "
+              f"embutido. Acrescente `Gerente` e `Email_Gerente` lá.")
+    return mapa, emails
+
+
 def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
     """Quadro por gerente: quem entrou, POR QUÊ, e quem você vetou.
 
@@ -632,18 +659,7 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
 
     p1 = io.abrir(gc, ID_DESTINO)
 
-    mapa = {}
-    for l in io.ler_aba(p1, ABA_GERENTES, obrigatoria=False):
-        v, g = _norm_nome(l.get("vendedor")), str(l.get("gerente") or "").strip()
-        if v and g:
-            mapa[v] = g
-    if not mapa:
-        mapa = {_norm_nome(k): v for k, v in GERENTES_INICIAIS.items()}
-        if escrever:
-            io.escrever_aba(p1, ABA_GERENTES, pd.DataFrame(
-                [{"vendedor": k, "gerente": v} for k, v in GERENTES_INICIAIS.items()]))
-            print(f"  '{ABA_GERENTES}' criada. Acrescente os demais; o resto "
-                  f"cai em '{GERENTE_PADRAO}'.")
+    mapa, _ = _mapa_gestores(p1)
 
     vendedor_de = {_codigo(l.get("codigo_cliente")): str(l.get("vendedor") or "").strip()
                    for l in io.ler_aba(p1, ABA_CONTATOS, obrigatoria=False)
@@ -706,8 +722,15 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
             "sem_mapeamento": _norm_nome(vend) not in mapa,
             "codigo_cliente": cod,
             "cliente": p.get("nome_cliente") or r.get("cliente"),
-            "situacao": "VETADO" if veto else ("cobrado" if cod in previa
-                                               else "fora da régua"),
+            # Antes do preparar() a prévia não existe: todo mundo cairia em
+            # "fora da régua", que é o oposto da verdade. O relatório roda nos
+            # DOIS momentos — antes do disparo, para o gerente poder vetar, e
+            # depois, para prestar contas — e precisa dizer a coisa certa em
+            # cada um.
+            "situacao": ("VETADO" if veto
+                         else "cobrado" if cod in previa
+                         else "A COBRAR" if not previa
+                         else "fora da régua"),
             "motivo_veto": veto,
             "devendo_desde": _desde(r.get("vencimento_mais_antigo")),
             "titulos": p.get("titulos") or r.get("titulos_abertos") or "",
@@ -720,21 +743,31 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
 
     linhas.sort(key=lambda l: (l["gerente"], l["vendedor"], -l["total"]))
 
+    antes = not previa
     print(f"\n{'#'*74}\n#  RELATÓRIO DE BLOQUEIOS — campanha {c.id_campanha}")
-    print(f"#  aviso em {c.data_envio:%d/%m/%Y}, prazo até {c.data_limite:%d/%m/%Y}")
+    if antes:
+        print(f"#  AINDA NÃO ENVIADO — envio previsto {c.data_envio:%d/%m/%Y}, "
+              f"prazo até {c.data_limite:%d/%m/%Y}")
+        print(f"#  Este é o momento de vetar: escreva o motivo na coluna `acao`")
+        print(f"#  da Campanha_Input e rode de novo.")
+    else:
+        print(f"#  aviso em {c.data_envio:%d/%m/%Y}, "
+              f"prazo até {c.data_limite:%d/%m/%Y}")
     if not escrever:
         print(f"#  PRÉVIA — nada foi escrito na planilha")
     print("#" * 74)
 
     for ger in sorted({l["gerente"] for l in linhas}):
         dele = [l for l in linhas if l["gerente"] == ger]
-        cobrados = [l for l in dele if l["situacao"] == "cobrado"]
+        cobrados = [l for l in dele if l["situacao"] in ("cobrado", "A COBRAR")]
         vetados = [l for l in dele if l["situacao"] == "VETADO"]
         tot = sum(l["total"] for l in cobrados)
         rec = sum(l["recebido"] for l in cobrados)
 
         print(f"\n\n{'='*74}\n{ger.upper()}")
-        print(f"{len(cobrados)} cliente(s) cobrado(s), R$ {tot:,.2f}"
+        rotulo = ("A COBRAR" if cobrados and cobrados[0]["situacao"] == "A COBRAR"
+                  else "cobrado(s)")
+        print(f"{len(cobrados)} cliente(s) {rotulo}, R$ {tot:,.2f}"
               + (f"  ·  R$ {rec:,.2f} recebidos" if rec else "")
               + (f"  ·  {len(vetados)} vetado(s)" if vetados else ""))
 
@@ -767,6 +800,66 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
         print(f"\n  (prévia — rode com escrever=True para gravar "
               f"em '{ABA_RESUMO_GERENTE}')")
     return {"linhas": linhas}
+
+
+def enviar_resumo_gestores(c, gc, enviar_fn=None, prazo_revisao: str = None,
+                           criterio: str = "", copia_gestao=(),
+                           so_para: str = None) -> list:
+    """Manda o relatório a cada gestor. Caminho PRÓPRIO, não passa pelo disparar.
+
+    Aviso ao cliente e relatório interno têm riscos diferentes: mandar quadro
+    errado ao Carlão é constrangedor, mandar cobrança errada à Ipiranga é outra
+    coisa. Compartilhar a mesma trava faria gestor contar no teto diário do
+    cliente e o `confirmo_producao` proteger duas coisas incomparáveis.
+
+    enviar_fn=None  -> PRÉVIA: monta tudo e não envia (padrão)
+    so_para='x@y'   -> manda todos para esse endereço, para conferir formato
+    copia_gestao    -> endereços que recebem CÓPIA de todos os quadros
+    """
+    from IPython.display import HTML, display
+    import template
+
+    dados = resumo_por_gerente(c, gc, escrever=False)["linhas"]
+    p1 = io.abrir(gc, ID_DESTINO)
+    _, emails = _mapa_gestores(p1)
+
+    prazo_revisao = prazo_revisao or f"{c.data_envio:%d/%m/%Y}"
+    criterio = criterio or (
+        "frequência de meses vencidos no grupo e no próprio cadastro, "
+        "com pelo menos 2 meses vencidos no ano corrente e uso de "
+        "equipamento nos últimos 90 dias")
+
+    saida = []
+    for ger in sorted({l["gerente"] for l in dados}):
+        linhas = [l for l in dados if l["gerente"] == ger]
+        msg = template.montar_email_gestor(ger, linhas, c, prazo_revisao, criterio)
+        destino = so_para or emails.get(ger)
+
+        if not destino:
+            print(f"  {ger}: SEM E-MAIL na Email_Vendedores — não enviado "
+                  f"({msg['cobrados']} cliente[s] no quadro)")
+            saida.append({"gerente": ger, "enviado": False, **msg})
+            continue
+
+        if enviar_fn is None:
+            print(f"\n{'='*70}\nPARA: {destino}"
+                  + (f"   CC: {', '.join(copia_gestao)}" if copia_gestao else "")
+                  + f"\nASSUNTO: {msg['assunto']}\n{'='*70}")
+            display(HTML(msg["html"]))
+        else:
+            enviar_fn(types.SimpleNamespace(
+                codigo_cliente=ger, nome_cliente=ger,
+                para=[destino], cc=list(copia_gestao),
+                assunto=msg["assunto"], html=msg["html"], texto=msg["texto"]))
+            print(f"  {ger} -> {destino}  ({msg['cobrados']} cliente[s]"
+                  + (f", {msg['vetados']} retirado[s]" if msg["vetados"] else "")
+                  + ")")
+        saida.append({"gerente": ger, "destino": destino,
+                      "enviado": enviar_fn is not None, **msg})
+
+    if enviar_fn is None:
+        print(f"\n  PRÉVIA — nada enviado. Para mandar, passe enviar_fn.")
+    return saida
 
 
 def resumo_campanhas(gc):
