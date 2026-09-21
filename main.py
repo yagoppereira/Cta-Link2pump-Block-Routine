@@ -663,9 +663,24 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
 
     mapa, _ = _mapa_gestores(p1)
 
-    vendedor_de = {_codigo(l.get("codigo_cliente")): str(l.get("vendedor") or "").strip()
-                   for l in io.ler_aba(p1, ABA_CONTATOS, obrigatoria=False)
-                   if str(l.get("vendedor") or "").strip()}
+    # CARTEIRA da Base_Clientes (planilha 2). A coluna `vendedor` da
+    # Contatos_Emails é o `representante` do CIGAM e só serve de reserva.
+    vendedor_de = {}
+    try:
+        import vendedores as _v
+        p2 = io.abrir(gc, ID_VENDEDORES)
+        cart = _v.carteira_de_base_clientes(
+            io.ler_aba(p2, ABA_BASE_CLIENTES, obrigatoria=False))
+        vendedor_de.update(cart.get("por_codigo", {}) if cart else {})
+    except Exception as exc:
+        print(f"  (Base_Clientes não lida: {type(exc).__name__}; "
+              f"vendedor virá da Contatos_Emails)")
+
+    for l in io.ler_aba(p1, ABA_CONTATOS, obrigatoria=False):
+        cod = _codigo(l.get("codigo_cliente"))
+        nome = str(l.get("vendedor") or "").strip()
+        if cod and nome and cod not in vendedor_de:
+            vendedor_de[cod] = nome
 
     previa = {_codigo(l.get("codigo_cliente")): l
               for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
@@ -703,8 +718,10 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
         r = entrada.get(cod, {})
         p = previa.get(cod, {})
         veto = str(r.get("acao") or "").strip()
-        vend = (str(p.get("vendedor") or "").strip()
-                or vendedor_de.get(cod, "") or "(sem vendedor)")
+        # Carteira atual tem precedência sobre a congelada: vendedor troca de
+        # cliente, e o relatório vai para o gestor de HOJE.
+        vend = (vendedor_de.get(cod, "")
+                or str(p.get("vendedor") or "").strip() or "(sem vendedor)")
 
         motivo = []
         if r.get("frequencia_propria"):
@@ -729,10 +746,17 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
             # DOIS momentos — antes do disparo, para o gerente poder vetar, e
             # depois, para prestar contas — e precisa dizer a coisa certa em
             # cada um.
+            # Um estado só para quem vai ser cobrado, congelado ou não.
+            # Havia dois — "cobrado" e "A COBRAR" — e o e-mail do gestor só
+            # montava bloco para o primeiro: antes do preparar() o quadro saía
+            # vazio com total zerado, que foi o que você viu.
+            # A distinção entre congelado e não congelado vira uma coluna
+            # própria, porque muda o VALOR (com ou sem encargos), não se o
+            # cliente entra.
             "situacao": ("VETADO" if veto
-                         else "cobrado" if cod in previa
-                         else "A COBRAR" if not previa
+                         else "cobrado" if (cod in previa or cod in entrada)
                          else "fora da régua"),
+            "congelado": cod in previa,
             "motivo_veto": veto,
             "devendo_desde": _desde(r.get("vencimento_mais_antigo")),
             "titulos": p.get("titulos") or r.get("titulos_abertos") or "",
@@ -746,6 +770,8 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
     linhas.sort(key=lambda l: (l["gerente"], l["vendedor"], -l["total"]))
 
     antes = not previa
+    nao_congelados = sum(1 for l in linhas
+                         if l["situacao"] == "cobrado" and not l["congelado"])
     print(f"\n{'#'*74}\n#  RELATÓRIO DE BLOQUEIOS — campanha {c.id_campanha}")
     if antes:
         print(f"#  AINDA NÃO ENVIADO — envio previsto {c.data_envio:%d/%m/%Y}, "
@@ -757,6 +783,11 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
               f"prazo até {c.data_limite:%d/%m/%Y}")
     if not escrever:
         print(f"#  PRÉVIA — nada foi escrito na planilha")
+    if nao_congelados:
+        print(f"#  {nao_congelados} cliente(s) ainda NÃO congelado(s): valores "
+              f"são o saldo da régua, sem encargos.")
+        print(f"#  Rode preparar() antes de enviar aos gestores, para o total "
+              f"bater com o que o cliente vai receber.")
     print("#" * 74)
 
     for ger in sorted({l["gerente"] for l in linhas}):
