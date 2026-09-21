@@ -690,6 +690,32 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
     if not previa and not entrada:
         raise RuntimeError(f"Nem '{ABA_PREVIA}' nem '{ABA_INPUT}' têm dados.")
 
+    # EQUIPAMENTOS. Do snapshot congelado quando existe; senão das colunas da
+    # régua. O gestor pediu isso e tem razão: é o parque do cliente dele que
+    # para, e ele precisa saber o tamanho antes de o bloqueio acontecer.
+    #
+    # Duas informações vão junto porque mudam a decisão, não só o volume:
+    # bomba em CNPJ de terceiro afeta quem não foi notificado, e sistema com
+    # pagante adimplente não pode ser bloqueado inteiro.
+    parque = {}
+    for b in io.ler_aba(p1, ABA_BOMBAS, obrigatoria=False):
+        if str(b.get("id_campanha") or "").strip() != c.id_campanha:
+            continue
+        d = parque.setdefault(_codigo(b.get("codigo_cliente")),
+                              {"seriais": set(), "terceiros": set(),
+                               "adimplentes": 0, "sistemas": set()})
+        if b.get("serial_equipamento") not in (None, ""):
+            d["seriais"].add(str(b["serial_equipamento"]))
+        if _bool_valor(b.get("instalada_em_terceiro")):
+            d["terceiros"].add(str(b.get("local_nome") or "terceiro").strip())
+        try:
+            d["adimplentes"] = max(d["adimplentes"],
+                                   int(float(b.get("bombas_de_adimplentes") or 0)))
+        except ValueError:
+            pass
+        if b.get("cliente_id"):
+            d["sistemas"].add(str(b["cliente_id"]))
+
     desfecho = {}
     for l in io.ler_aba(p1, "Campanha_Auditoria", obrigatoria=False):
         if str(l.get("id_campanha") or "").strip() != c.id_campanha:
@@ -762,6 +788,14 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
             "titulos": p.get("titulos") or r.get("titulos_abertos") or "",
             "total": _numero_br(p.get("total")) or _numero_br(r.get("em_atraso")),
             "por_que_entrou": "; ".join(motivo) or "(sem evidência)",
+            "equipamentos": (len(parque[cod]["seriais"]) if cod in parque
+                             else (r.get("equipamentos") or "")),
+            "seriais": ("; ".join(sorted(parque[cod]["seriais"])) if cod in parque
+                        else str(r.get("seriais") or "")),
+            "em_terceiro": ("; ".join(sorted(parque[cod]["terceiros"]))
+                            if cod in parque else ""),
+            "sistema_com_adimplente": (parque[cod]["adimplentes"]
+                                       if cod in parque else ""),
             "resultado": _resultado(cod),
             "recebido": round(desfecho.get(cod, {}).get("recebido", 0.0), 2),
             "id_campanha": c.id_campanha,
