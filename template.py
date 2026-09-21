@@ -546,6 +546,23 @@ def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
     for l in itens:
         extra = (f'<div style="font-size:11px;color:#b45309">retirado: '
                  f'{l.get("motivo_veto")}</div>' if vetado else "")
+
+        # Parque do cliente. O gestor pediu, e muda a leitura: 1 bomba parada
+        # e 14 bombas paradas são conversas diferentes com o mesmo cliente.
+        eq = l.get("equipamentos")
+        if eq not in (None, "", 0):
+            seriais = str(l.get("seriais") or "")
+            curto = (seriais if len(seriais) <= 70 else seriais[:67] + "...")
+            extra += (f'<div style="font-size:11px;color:#374151;margin-top:3px">'
+                      f'{eq} equipamento(s)'
+                      + (f' — {curto}' if curto else "") + '</div>')
+        if l.get("em_terceiro"):
+            extra += (f'<div style="font-size:11px;color:#b45309">'
+                      f'em operação de terceiro: {l["em_terceiro"]}</div>')
+        if l.get("sistema_com_adimplente"):
+            extra += (f'<div style="font-size:11px;color:#b45309">'
+                      f'sistema compartilhado com {l["sistema_com_adimplente"]} '
+                      f'bomba(s) de pagante em dia — bloqueio só da bomba</div>')
         res = l.get("resultado") or ""
         marca = (f' <span style="font-size:11px;color:#059669">[{res}]</span>'
                  if res else "")
