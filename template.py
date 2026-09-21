@@ -476,3 +476,144 @@ def _versao_texto(titulos: list, campanha, mostrar_cnpj: bool = False) -> str:
         SITE,
     ]
     return "\n".join(linhas)
+
+
+# ============================================================================
+# E-MAIL PARA GESTORES — formato interno, não é cobrança
+# ============================================================================
+#
+# Deliberadamente diferente do aviso ao cliente. Aquele é um documento formal
+# que pede pagamento; este é um relatório operacional que pede revisão. Usar o
+# mesmo template faria o gestor ler como se fosse cobrança dirigida a ele, e
+# esconderia o que importa: a evidência por trás de cada entrada e os clientes
+# que foram retirados.
+
+CORPO_GESTOR = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1a2e;line-height:1.55;max-width:900px">
+<p>{saudacao},</p>
+<p>Segue a relação de clientes da sua equipe na régua de bloqueio por
+inadimplência da campanha <strong>{id_campanha}</strong>.</p>
+{destaque}
+<p><strong>O prazo para retirar alguém é {prazo_revisao}.</strong> Se algum
+cliente não deve ser cobrado, responda este e-mail com o código e o motivo —
+o motivo fica registrado junto da decisão.</p>
+{blocos}
+<p style="font-size:12px;color:#6b7280;margin-top:22px">
+Critério desta campanha: {criterio}<br>
+Dados posicionados em {data_envio}. Cliente em acordo vigente, em cobrança
+jurídica ou em recuperação judicial não entra na régua automaticamente.</p>
+{assinatura}
+</div>"""
+
+
+def _destaque_gestor(cobrados: list, vetados: list) -> str:
+    total = sum(float(l.get("total") or 0) for l in cobrados)
+    celula = ("padding:12px 16px;background:#1a1a2e;color:#ffffff;"
+              "font-family:Arial,Helvetica,sans-serif;vertical-align:middle")
+    rot = "font-size:11px;color:#19e098;letter-spacing:.5px;text-transform:uppercase"
+    cel = (f'<td style="{celula}"><div style="{rot}">Na régua</div>'
+           f'<div style="font-size:26px;font-weight:bold;line-height:1.2">'
+           f'{len(cobrados)}</div>'
+           f'<div style="font-size:11px;color:#a9b0c0">cliente(s)</div></td>'
+           f'<td style="{celula};border-left:1px solid #3a3a52">'
+           f'<div style="{rot}">Total em aberto</div>'
+           f'<div style="font-size:26px;font-weight:bold;line-height:1.2;'
+           f'white-space:nowrap">{brl(total)}</div></td>')
+    if vetados:
+        cel += (f'<td style="{celula};border-left:1px solid #3a3a52">'
+                f'<div style="{rot}">Já retirados</div>'
+                f'<div style="font-size:26px;font-weight:bold;line-height:1.2">'
+                f'{len(vetados)}</div>'
+                f'<div style="font-size:11px;color:#a9b0c0">por decisão</div></td>')
+    return ('<table cellpadding="0" cellspacing="0" role="presentation" '
+            'style="border-collapse:collapse;width:100%;margin:16px 0">'
+            f'<tr>{cel}</tr></table>')
+
+
+def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
+    th = ('padding:7px 9px;background:#f0efe9;color:#1a1a2e;font-weight:bold;'
+          'font-size:11px;border:1px solid #d3d1c7;text-align:left')
+    td = 'padding:7px 9px;border:1px solid #d3d1c7;font-size:12px'
+    cor = "#8b8b8b" if vetado else "#1a1a2e"
+
+    linhas = []
+    for l in itens:
+        extra = (f'<div style="font-size:11px;color:#b45309">retirado: '
+                 f'{l.get("motivo_veto")}</div>' if vetado else "")
+        res = l.get("resultado") or ""
+        marca = (f' <span style="font-size:11px;color:#059669">[{res}]</span>'
+                 if res else "")
+        linhas.append(
+            f'<tr>'
+            f'<td style="{td}"><strong>{l.get("cliente")}</strong>{marca}'
+            f'<div style="font-size:11px;color:#6b7280">'
+            f'{l.get("por_que_entrou")}</div>{extra}</td>'
+            f'<td style="{td};text-align:right;white-space:nowrap">'
+            f'{brl(float(l.get("total") or 0))}</td>'
+            f'<td style="{td};text-align:center;white-space:nowrap">'
+            f'{l.get("devendo_desde") or "—"}</td>'
+            f'</tr>')
+
+    titulo = f'{vendedor} — {len(itens)} cliente(s)'
+    return (f'<p style="margin:18px 0 6px;font-weight:bold;color:{cor}">{titulo}</p>'
+            '<table cellpadding="0" cellspacing="0" role="presentation" '
+            'style="border-collapse:collapse;width:100%">'
+            f'<thead><tr><th style="{th}">Cliente e motivo</th>'
+            f'<th style="{th};text-align:right">Em aberto</th>'
+            f'<th style="{th};text-align:center">Devendo desde</th></tr></thead>'
+            f'<tbody>{"".join(linhas)}</tbody></table>')
+
+
+def montar_email_gestor(gerente: str, linhas: list, campanha,
+                        prazo_revisao: str, criterio: str) -> dict:
+    """Relatório do gestor: quem entrou, por quê, e quem já foi retirado.
+
+    Os vetados vão junto de propósito. Sem eles o gestor vê só o que foi
+    cobrado e reage àquilo; com eles, vê que a régua também poupou clientes da
+    equipe e por quais motivos — e a conversa passa a ser sobre o critério.
+    """
+    cobrados = [l for l in linhas if l.get("situacao") == "cobrado"]
+    vetados = [l for l in linhas if l.get("situacao") == "VETADO"]
+
+    blocos = []
+    for vend in sorted({l["vendedor"] for l in cobrados}):
+        blocos.append(_bloco_vendedor(
+            vend, sorted([l for l in cobrados if l["vendedor"] == vend],
+                         key=lambda x: -float(x.get("total") or 0))))
+    if vetados:
+        blocos.append('<p style="margin:26px 0 4px;font-weight:bold;'
+                      'color:#8b8b8b">NÃO entraram — retirados por decisão</p>')
+        for vend in sorted({l["vendedor"] for l in vetados}):
+            blocos.append(_bloco_vendedor(
+                vend, [l for l in vetados if l["vendedor"] == vend], vetado=True))
+
+    logo = (f'<img src="cid:{LOGO_CID}" alt="Cta Smart" width="150" '
+            f'style="display:block;border:0">' if LOGO_PATH else "")
+    assinatura = ASSINATURA_HTML.strip() or ASSINATURA_PADRAO.format(
+        logo=logo, remetente_nome=REMETENTE_NOME,
+        remetente_cargo=REMETENTE_CARGO, site=SITE)
+
+    html = CORPO_GESTOR.format(
+        saudacao=f"Olá, {gerente}" if gerente else "Olá",
+        id_campanha=campanha.id_campanha,
+        destaque=_destaque_gestor(cobrados, vetados),
+        prazo_revisao=prazo_revisao,
+        blocos="".join(blocos) or "<p>Nenhum cliente da sua equipe na régua.</p>",
+        criterio=criterio,
+        data_envio=_dma(campanha.data_envio),
+        assinatura=assinatura,
+    )
+    texto = "\n".join(
+        [f"{gerente} — régua de bloqueio {campanha.id_campanha}", "",
+         f"{len(cobrados)} cliente(s) na régua, "
+         f"{brl(sum(float(l.get('total') or 0) for l in cobrados))}.",
+         f"Prazo para retirar alguém: {prazo_revisao}.", ""]
+        + [f"  {l['vendedor']} | {l['cliente']} | "
+           f"{brl(float(l.get('total') or 0))} | {l.get('por_que_entrou')}"
+           for l in cobrados])
+
+    return {
+        "assunto": (f"Régua de bloqueio {campanha.id_campanha} — "
+                    f"{len(cobrados)} cliente(s) da sua equipe"),
+        "html": html, "texto": texto,
+        "cobrados": len(cobrados), "vetados": len(vetados),
+    }
