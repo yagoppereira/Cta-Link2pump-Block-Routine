@@ -1,13 +1,20 @@
 """
 Vendedor em cópia no aviso de bloqueio.
 
-FONTE ÚNICA: PLANILHA 1. A planilha 2 saiu do circuito.
-O cruzamento cliente <-> vendedor já foi resolvido quando a Contatos_Emails
-foi gerada; reler a Base_Clientes seria refazer um trabalho já feito, por um
-caminho mais frágil.
+FONTE DA CARTEIRA: aba Base_Clientes, na PLANILHA 2.
 
-  Contatos_Emails    codigo_cliente | nome_cliente | cnpj_cpf | ... | vendedor
-  Email_Vendedores   Vendedor | Email | Ativo (opcional)
+Durante um tempo usei a coluna `vendedor` da Contatos_Emails, achando que o
+cruzamento já estava resolvido lá. Estava errado: aquela coluna carrega o
+campo `representante` do CIGAM, que é cadastro antigo e não carteira. Foi de
+lá que saiu "MÁRIO LUCAS" — um colaborador de divisão 40 que não existe como
+vendedor, preenchido no cadastro do Peter Ferter e propagado sem ninguém pedir.
+
+A Base_Clientes é mantida pelo comercial e descreve a carteira vigente.
+Reler dela não é refazer trabalho: é ler a fonte certa.
+
+  Base_Clientes      (planilha 2) chave do cliente | vendedor
+  Contatos_Emails    (planilha 1) codigo_cliente | nome_cliente | cnpj_cpf
+  Email_Vendedores   (planilha 1) Vendedor | Email | Ativo | Gerente | Email_Gerente
 
 JOIN SEMPRE POR codigo_cliente, NUNCA POR cnpj_cpf.
 A coluna cnpj_cpf da Contatos_Emails virou número em algum ponto do caminho e
@@ -103,13 +110,71 @@ class ResolucaoVendedores:
         return "\n".join(L)
 
 
+def carteira_de_base_clientes(base_clientes: list) -> dict:
+    """{codigo_cliente: vendedor} a partir da Base_Clientes.
+
+    Detecta as colunas em vez de exigir nomes fixos: a planilha é de outro
+    processo e pode mudar sem aviso. Procura, nesta ordem, uma coluna de
+    código de cliente e uma de CNPJ; o vendedor é qualquer coluna cujo nome
+    contenha "vendedor", "representante" ou "carteira".
+
+    Imprime o que encontrou. Se detectar errado, é melhor você ver na hora do
+    que descobrir por um nome estranho no rodapé de um e-mail.
+    """
+    if not base_clientes:
+        return {}
+
+    cols = list(base_clientes[0])
+    def achar(*termos):
+        for c in cols:
+            k = chave(c)
+            if any(t in k for t in termos):
+                return c
+        return None
+
+    col_cod = achar("CODIGOCLIENTE", "CODIGO", "COD")
+    col_cnpj = achar("CNPJ", "CPF", "DOCUMENTO")
+    col_vend = achar("VENDEDOR", "REPRESENTANTE", "CARTEIRA")
+
+    if not col_vend:
+        print(f"  Base_Clientes SEM coluna de vendedor. Colunas: "
+              f"{', '.join(cols[:10])}")
+        return {}
+
+    carteira, por_cnpj = {}, {}
+    for l in base_clientes:
+        nome = str(l.get(col_vend) or "").replace("\u00a0", " ").strip()
+        if not nome:
+            continue
+        cod = normalizar_codigo(l.get(col_cod)) if col_cod else None
+        if cod:
+            carteira[cod] = nome
+        if col_cnpj:
+            d = re.sub(r"\D", "", str(l.get(col_cnpj) or ""))
+            if d:
+                por_cnpj[d.zfill(14) if len(d) > 11 else d] = nome
+
+    print(f"  Base_Clientes: {len(base_clientes)} linha(s); vendedor em "
+          f"'{col_vend}'"
+          + (f", código em '{col_cod}'" if col_cod else "")
+          + (f", CNPJ em '{col_cnpj}'" if col_cnpj else "")
+          + f" -> {len(carteira)} por código, {len(por_cnpj)} por CNPJ")
+    return {"por_codigo": carteira, "por_cnpj": por_cnpj,
+            "vendedores": sorted({*carteira.values(), *por_cnpj.values()})}
+
+
 def resolver_vendedores(contatos_emails: list,
                         email_vendedores: list,
-                        codigos: list) -> ResolucaoVendedores:
+                        codigos: list,
+                        base_clientes: list = None) -> ResolucaoVendedores:
     """
-    contatos_emails:  aba Contatos_Emails (planilha 1)
-    email_vendedores: aba Email_Vendedores (planilha 1)
+    base_clientes:    aba Base_Clientes (planilha 2) — FONTE DA CARTEIRA
+    contatos_emails:  aba Contatos_Emails (planilha 1) — só para o CNPJ
+    email_vendedores: aba Email_Vendedores (planilha 1) — e-mail e gerente
     codigos:          códigos da campanha, já em zfill(6)
+
+    Sem `base_clientes` cai na coluna `vendedor` da Contatos_Emails e AVISA.
+    Aquela coluna é o `representante` do CIGAM, não a carteira.
     """
     r = ResolucaoVendedores()
 
@@ -129,9 +194,31 @@ def resolver_vendedores(contatos_emails: list,
                                  "ativo": ativo}
 
     vendedor_por_codigo = {}
+
+    carteira = carteira_de_base_clientes(base_clientes or [])
+    if carteira:
+        vendedor_por_codigo.update(carteira["por_codigo"])
+        # Completa pelo CNPJ quem a Base_Clientes não trouxe por código.
+        if carteira["por_cnpj"]:
+            for l in contatos_emails:
+                cod = normalizar_codigo(_campo(l, "codigo_cliente"))
+                if not cod or cod in vendedor_por_codigo:
+                    continue
+                d = re.sub(r"\D", "", str(_campo(l, "cnpj_cpf") or ""))
+                for tentativa in (d, d.zfill(14), d.zfill(11)):
+                    if tentativa in carteira["por_cnpj"]:
+                        vendedor_por_codigo[cod] = carteira["por_cnpj"][tentativa]
+                        break
+    else:
+        print("  AVISO: sem Base_Clientes, usando a coluna `vendedor` da "
+              "Contatos_Emails — ela é o `representante` do CIGAM, não a "
+              "carteira do comercial.")
+
     for l in contatos_emails:
         cod = normalizar_codigo(_campo(l, "codigo_cliente"))
         nome = str(_campo(l, "vendedor")).replace("\u00a0", " ").strip()
+        if cod and cod in vendedor_por_codigo:
+            continue
         if cod:
             vendedor_por_codigo[cod] = nome
 
