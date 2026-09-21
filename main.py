@@ -702,10 +702,20 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
         if str(b.get("id_campanha") or "").strip() != c.id_campanha:
             continue
         d = parque.setdefault(_codigo(b.get("codigo_cliente")),
-                              {"seriais": set(), "terceiros": set(),
+                              {"seriais": set(), "equip": {}, "terceiros": set(),
                                "adimplentes": 0, "sistemas": set()})
-        if b.get("serial_equipamento") not in (None, ""):
-            d["seriais"].add(str(b["serial_equipamento"]))
+        serial = b.get("serial_equipamento")
+        if serial not in (None, ""):
+            d["seriais"].add(str(serial))
+            # NOME da bomba, não só o serial: quem conhece o cliente reconhece
+            # "Fazenda Santa Rita - S10", não "21130". Indexado por serial
+            # porque o bloqueio é do equipamento, e dois canais do mesmo
+            # equipamento viram uma linha só.
+            import template as _t
+            nome = _t.limpar_nome_bomba(b.get("bomba_nome"),
+                                        b.get("nome_cliente") or "")
+            if nome:
+                d["equip"].setdefault(str(serial), nome)
         if _bool_valor(b.get("instalada_em_terceiro")):
             d["terceiros"].add(str(b.get("local_nome") or "terceiro").strip())
         try:
@@ -792,6 +802,12 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
                              else (r.get("equipamentos") or "")),
             "seriais": ("; ".join(sorted(parque[cod]["seriais"])) if cod in parque
                         else str(r.get("seriais") or "")),
+            # "NOME (serial)" quando o snapshot tem o nome; só o serial quando
+            # veio da régua, que não carrega essa coluna.
+            "equipamentos_nomes": ("; ".join(
+                f"{n} ({s})" for s, n in sorted(parque[cod]["equip"].items(),
+                                                key=lambda x: x[1]))
+                if cod in parque and parque[cod]["equip"] else ""),
             "em_terceiro": ("; ".join(sorted(parque[cod]["terceiros"]))
                             if cod in parque else ""),
             "sistema_com_adimplente": (parque[cod]["adimplentes"]
