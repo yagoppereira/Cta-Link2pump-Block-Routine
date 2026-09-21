@@ -804,9 +804,8 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
     return {"linhas": linhas}
 
 
-def enviar_resumo_gestores(c, gc, enviar_fn=None, prazo_revisao: str = None,
-                           criterio: str = "", copia_gestao=(),
-                           so_para: str = None) -> list:
+def enviar_resumo_gestores(c, gc, enviar_fn=None, criterio: str = "",
+                           copia_gestao=(), so_para: str = None) -> list:
     """Manda o relatório a cada gestor. Caminho PRÓPRIO, não passa pelo disparar.
 
     Aviso ao cliente e relatório interno têm riscos diferentes: mandar quadro
@@ -825,7 +824,6 @@ def enviar_resumo_gestores(c, gc, enviar_fn=None, prazo_revisao: str = None,
     p1 = io.abrir(gc, ID_DESTINO)
     _, emails = _mapa_gestores(p1)
 
-    prazo_revisao = prazo_revisao or f"{c.data_envio:%d/%m/%Y}"
     criterio = criterio or (
         "frequência de meses vencidos no grupo e no próprio cadastro, "
         "com pelo menos 2 meses vencidos no ano corrente e uso de "
@@ -834,7 +832,7 @@ def enviar_resumo_gestores(c, gc, enviar_fn=None, prazo_revisao: str = None,
     saida = []
     for ger in sorted({l["gerente"] for l in dados}):
         linhas = [l for l in dados if l["gerente"] == ger]
-        msg = template.montar_email_gestor(ger, linhas, c, prazo_revisao, criterio)
+        msg = template.montar_email_gestor(ger, linhas, c, criterio)
         destino = so_para or emails.get(ger)
 
         if not destino:
