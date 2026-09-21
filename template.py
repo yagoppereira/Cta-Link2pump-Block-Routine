@@ -493,9 +493,11 @@ CORPO_GESTOR = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:1
 <p>Segue a relação de clientes da sua equipe na régua de bloqueio por
 inadimplência da campanha <strong>{id_campanha}</strong>.</p>
 {destaque}
-<p><strong>O prazo para retirar alguém é {prazo_revisao}.</strong> Se algum
-cliente não deve ser cobrado, responda este e-mail com o código e o motivo —
-o motivo fica registrado junto da decisão.</p>
+<p>O aviso de cobrança é enviado a estes clientes em seguida.
+<strong>O bloqueio ocorre a partir de {data_limite}</strong>, caso a pendência
+não seja regularizada até lá.</p>
+<p>Se você tiver informação sobre algum dos clientes abaixo — negociação em
+andamento, cobrança indevida, contato já feito — avise o financeiro.</p>
 {blocos}
 <p style="font-size:12px;color:#6b7280;margin-top:22px">
 Critério desta campanha: {criterio}<br>
@@ -505,7 +507,7 @@ jurídica ou em recuperação judicial não entra na régua automaticamente.</p>
 </div>"""
 
 
-def _destaque_gestor(cobrados: list, vetados: list) -> str:
+def _destaque_gestor(cobrados: list, vetados: list, bloqueio: str = "") -> str:
     total = sum(float(l.get("total") or 0) for l in cobrados)
     celula = ("padding:12px 16px;background:#1a1a2e;color:#ffffff;"
               "font-family:Arial,Helvetica,sans-serif;vertical-align:middle")
@@ -518,6 +520,11 @@ def _destaque_gestor(cobrados: list, vetados: list) -> str:
            f'<div style="{rot}">Total em aberto</div>'
            f'<div style="font-size:26px;font-weight:bold;line-height:1.2;'
            f'white-space:nowrap">{brl(total)}</div></td>')
+    if bloqueio:
+        cel += (f'<td style="{celula};border-left:1px solid #3a3a52">'
+                f'<div style="{rot}">Bloqueio a partir de</div>'
+                f'<div style="font-size:26px;font-weight:bold;line-height:1.2;'
+                f'white-space:nowrap">{bloqueio}</div></td>')
     if vetados:
         cel += (f'<td style="{celula};border-left:1px solid #3a3a52">'
                 f'<div style="{rot}">Já retirados</div>'
@@ -564,12 +571,22 @@ def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
 
 
 def montar_email_gestor(gerente: str, linhas: list, campanha,
-                        prazo_revisao: str, criterio: str) -> dict:
+                        criterio: str = "", prazo_revisao=None) -> dict:
     """Relatório do gestor: quem entrou, por quê, e quem já foi retirado.
+
+    NÃO pede revisão nem dá prazo ao gestor: o aviso ao cliente sai em
+    seguida. O que ele informa é a data do BLOQUEIO, e o pedido é que
+    qualquer informação sobre os clientes chegue ao financeiro — negociação em
+    curso, cobrança indevida, contato já feito.
+
+    A diferença não é de texto. Prazo de revisão criava a expectativa de que
+    a lista ficaria parada esperando resposta, e ela não fica.
 
     Os vetados vão junto de propósito. Sem eles o gestor vê só o que foi
     cobrado e reage àquilo; com eles, vê que a régua também poupou clientes da
     equipe e por quais motivos — e a conversa passa a ser sobre o critério.
+
+    prazo_revisao: aceito e ignorado, para não quebrar chamadas antigas.
     """
     cobrados = [l for l in linhas if l.get("situacao") == "cobrado"]
     vetados = [l for l in linhas if l.get("situacao") == "VETADO"]
@@ -595,8 +612,9 @@ def montar_email_gestor(gerente: str, linhas: list, campanha,
     html = CORPO_GESTOR.format(
         saudacao=f"Olá, {gerente}" if gerente else "Olá",
         id_campanha=campanha.id_campanha,
-        destaque=_destaque_gestor(cobrados, vetados),
-        prazo_revisao=prazo_revisao,
+        destaque=_destaque_gestor(cobrados, vetados,
+                                  _dma(campanha.data_limite)),
+        data_limite=_dma(campanha.data_limite),
         blocos="".join(blocos) or "<p>Nenhum cliente da sua equipe na régua.</p>",
         criterio=criterio,
         data_envio=_dma(campanha.data_envio),
@@ -606,7 +624,8 @@ def montar_email_gestor(gerente: str, linhas: list, campanha,
         [f"{gerente} — régua de bloqueio {campanha.id_campanha}", "",
          f"{len(cobrados)} cliente(s) na régua, "
          f"{brl(sum(float(l.get('total') or 0) for l in cobrados))}.",
-         f"Prazo para retirar alguém: {prazo_revisao}.", ""]
+         f"Bloqueio a partir de {_dma(campanha.data_limite)}. "
+         f"Informação sobre algum cliente: avise o financeiro.", ""]
         + [f"  {l['vendedor']} | {l['cliente']} | "
            f"{brl(float(l.get('total') or 0))} | {l.get('por_que_entrou')}"
            for l in cobrados])
