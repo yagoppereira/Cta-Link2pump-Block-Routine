@@ -110,6 +110,28 @@ class ResolucaoVendedores:
         return "\n".join(L)
 
 
+def _chaves_doc(valor) -> set:
+    """Todas as grafias plausíveis de um CNPJ/CPF, para o join não depender
+    de zero à esquerda.
+
+    O Sheets come zeros dos dois lados: a Base_Clientes pode ter 7636657001241
+    e a Contatos_Emails 07636657001241 para o mesmo cliente. Indexar por várias
+    formas é mais barato que adivinhar qual sobreviveu.
+    """
+    d = re.sub(r"\D", "", str(valor or ""))
+    if not d:
+        return set()
+    formas = {d}
+    # CPF e CNPJ não se convertem um no outro. Um documento de 11 dígitos é
+    # CPF completo: preenchê-lo até 14 gera "00022032365820", que não existe e
+    # pode casar por acidente com outro registro.
+    if len(d) <= 11:
+        formas.add(d.zfill(11))          # CPF com zero comido
+    if 11 < len(d) <= 14:
+        formas.add(d.zfill(14))          # CNPJ com zero comido
+    return formas
+
+
 def carteira_de_base_clientes(base_clientes: list) -> dict:
     """{codigo_cliente: vendedor} a partir da Base_Clientes.
 
@@ -150,9 +172,8 @@ def carteira_de_base_clientes(base_clientes: list) -> dict:
         if cod:
             carteira[cod] = nome
         if col_cnpj:
-            d = re.sub(r"\D", "", str(l.get(col_cnpj) or ""))
-            if d:
-                por_cnpj[d.zfill(14) if len(d) > 11 else d] = nome
+            for k in _chaves_doc(l.get(col_cnpj)):
+                por_cnpj[k] = nome
 
     print(f"  Base_Clientes: {len(base_clientes)} linha(s); vendedor em "
           f"'{col_vend}'"
@@ -204,10 +225,12 @@ def resolver_vendedores(contatos_emails: list,
                 cod = normalizar_codigo(_campo(l, "codigo_cliente"))
                 if not cod or cod in vendedor_por_codigo:
                     continue
-                d = re.sub(r"\D", "", str(_campo(l, "cnpj_cpf") or ""))
-                for tentativa in (d, d.zfill(14), d.zfill(11)):
-                    if tentativa in carteira["por_cnpj"]:
-                        vendedor_por_codigo[cod] = carteira["por_cnpj"][tentativa]
+                # Mesmo normalizador dos dois lados. A versão anterior gerava
+                # zfill(14) para CPF, o que produz documento inexistente e
+                # pode casar por acidente.
+                for k in _chaves_doc(_campo(l, "cnpj_cpf")):
+                    if k in carteira["por_cnpj"]:
+                        vendedor_por_codigo[cod] = carteira["por_cnpj"][k]
                         break
     else:
         print("  AVISO: sem Base_Clientes, usando a coluna `vendedor` da "
