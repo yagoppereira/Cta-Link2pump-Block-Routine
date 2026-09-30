@@ -18,7 +18,7 @@ para sempre quem quitou um acordo antigo e voltou a atrasar.
 
 O ACORDO COBRE TÍTULOS, NÃO O CLIENTE. Cada linha da aba tem um `DOC`. Um
 cliente que negociou cinco títulos e deixou de pagar outros três deve ser
-notificado pelos três. Por isso `titulos_protegidos` guarda os DOCs, e a
+notificado pelos três. Por isso `titulos_do_acordo` guarda os DOCs, e a
 exclusão do cliente só acontece quando TODOS os títulos vencidos dele estão
 cobertos por acordo vigente.
 
