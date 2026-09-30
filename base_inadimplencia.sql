@@ -1,3 +1,9 @@
+-- SCHEMA: silver_pier, não silver.
+-- Em 30/09/2026 o DW separou os dados financeiros sensíveis em schemas
+-- próprios (bronze_pier, silver_pier). A lancamentos_enriquecidos foi junto;
+-- a versão antiga parou de atualizar e será excluída.
+-- Medido na troca: a auditoria de baixas lia 1.908 clientes no schema velho e
+-- 2.082 no novo — 174 clientes e R$ 460 mil que sumiriam em silêncio.
 -- ============================================================================
 -- Base de inadimplência remontada do DW
 -- ============================================================================
@@ -72,7 +78,7 @@ WITH emp AS (
 --   normais -> silver.titulos_cigam. Conferida contra o export do CIGAM:
 --              452 de 467 clientes batem NO CENTAVO, 2.724 títulos idênticos.
 --
---   X90     -> bronze.cigam__lancamentos, codigoTipo 'E', montante em `valor`.
+--   X90     -> bronze_pier.cigam__lancamentos, codigoTipo 'E', montante em `valor`.
 --              Também conferido no centavo: 1.164 lançamentos / R$ 828.988,58
 --              e 2 de juros / R$ 137,99, iguais ao export.
 --
@@ -106,7 +112,7 @@ WITH emp AS (
 -- metade recebendo carta de bloqueio é a pior combinação possível.
 sob_tutela_juridica AS (
     SELECT DISTINCT codigoEmpresa
-    FROM `hip-bonito-453017-m2.silver.lancamentos_enriquecidos`
+    FROM `hip-bonito-453017-m2.silver_pier.lancamentos_enriquecidos`
     WHERE codigoPortador IN ('X91', 'X92', 'X99')
       AND SAFE_CAST(valor AS FLOAT64) > 0
 ),
