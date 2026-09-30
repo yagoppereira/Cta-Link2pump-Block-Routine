@@ -3,7 +3,7 @@ Ponte para o número da NFS-e.
 
 O CIGAM tem o campo NF_SERVICO no relatório de títulos (ex.: 202400000016587
 para a fatura 20261095, 6111 para a 6284). Ele NÃO existe em nenhuma tabela do
-warehouse — conferi em silver.lancamentos_enriquecidos e em
+warehouse — conferi em silver_pier.lancamentos_enriquecidos e em
 bronze.cigam__notas_fiscais, e o landing não é legível com a permissão atual.
 
 Até que o campo seja ingerido, esta ponte permite exibir a NFS-e no e-mail:
