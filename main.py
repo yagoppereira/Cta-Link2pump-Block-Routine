@@ -505,7 +505,7 @@ def auditar_titulos(c, gc, bq, escrever: bool = True) -> dict:
         WHEN STARTS_WITH(COALESCE(l.codigoPortador,''),'X9') THEN 'BAIXA CONTABIL'
         ELSE CONCAT('OUTRO (', COALESCE(l.codigoPortador,'?'), ')')
       END AS natureza
-    FROM `{PROJECT_ID}.silver.lancamentos_enriquecidos` l
+    FROM `{PROJECT_ID}.silver_pier.lancamentos_enriquecidos` l
     WHERE l.codigoTipo = 'E' AND l.situacao IN ('L','U','J')
       AND l.codigoPartida IN UNNEST(@ids)
       AND SAFE.PARSE_DATE('%d/%m/%Y', l.data) >= DATE '{c.data_envio:%Y-%m-%d}'
@@ -640,7 +640,23 @@ def _mapa_gestores(p1):
     return mapa, emails
 
 
-def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
+def _nomes_equip(dados, nome_cliente: str) -> str:
+    """'Fazenda Boa Vista - S10 (21130); Sede - Arla (21370)'.
+
+    Tira o nome do cliente repetido no começo do nome da bomba, e cai no
+    serial puro quando a view não tem nome.
+    """
+    if not dados or not dados.get("equip"):
+        return ""
+    import template as _t
+    saida = []
+    for serial, bruto in dados["equip"].items():
+        nome = _t.limpar_nome_bomba(bruto, nome_cliente) if bruto else ""
+        saida.append(f"{nome} ({serial})" if nome else str(serial))
+    return "; ".join(sorted(saida))
+
+
+def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
     """Quadro por gerente: quem entrou, POR QUÊ, e quem você vetou.
 
     Duas fontes, de propósito:
@@ -665,7 +681,7 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
 
     # CARTEIRA da Base_Clientes (planilha 2). A coluna `vendedor` da
     # Contatos_Emails é o `representante` do CIGAM e só serve de reserva.
-    vendedor_de = {}
+    vendedor_de, cart = {}, None
     try:
         import vendedores as _v
         p2 = io.abrir(gc, ID_VENDEDORES)
@@ -676,11 +692,48 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
         print(f"  (Base_Clientes não lida: {type(exc).__name__}; "
               f"vendedor virá da Contatos_Emails)")
 
+    # A Base_Clientes NÃO tem coluna de código — só CNPJ. Sem resolver por
+    # CNPJ, `por_codigo` vem vazio e todo mundo cai no fallback da
+    # Contatos_Emails, que é o `representante` do CIGAM. Foi o que fez 13 de
+    # 13 clientes virem da fonte errada.
+    doc_de = {}
+    for l in io.ler_aba(p1, ABA_CONTATOS, obrigatoria=False):
+        cod = _codigo(l.get("codigo_cliente"))
+        if cod:
+            doc_de.setdefault(cod, l.get("cnpj_cpf"))
+    for fonte in (previa.values() if isinstance(previa, dict) else [],):
+        for l in fonte:
+            cod = _codigo(l.get("codigo_cliente"))
+            if cod and not doc_de.get(cod):
+                doc_de[cod] = l.get("cnpj_cpf")
+    for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False):
+        cod = _codigo(l.get("codigo") or l.get("codigo_cliente"))
+        if cod and not doc_de.get(cod):
+            doc_de[cod] = l.get("cnpj")
+
+    por_cnpj = (cart or {}).get("por_cnpj", {})
+    if por_cnpj:
+        achados = 0
+        for cod, doc in doc_de.items():
+            if cod in vendedor_de:
+                continue
+            for k in _v._chaves_doc(doc):
+                if k in por_cnpj:
+                    vendedor_de[cod] = por_cnpj[k]
+                    achados += 1
+                    break
+        print(f"  carteira por CNPJ: {achados} cliente(s) resolvido(s)")
+
+    reserva = 0
     for l in io.ler_aba(p1, ABA_CONTATOS, obrigatoria=False):
         cod = _codigo(l.get("codigo_cliente"))
         nome = str(l.get("vendedor") or "").strip()
         if cod and nome and cod not in vendedor_de:
             vendedor_de[cod] = nome
+            reserva += 1
+    if reserva:
+        print(f"  {reserva} cliente(s) SEM carteira na Base_Clientes — usei o "
+              f"`representante` do CIGAM, que pode estar desatualizado.")
 
     previa = {_codigo(l.get("codigo_cliente")): l
               for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
@@ -725,6 +778,31 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
             pass
         if b.get("cliente_id"):
             d["sistemas"].add(str(b["cliente_id"]))
+
+    # Quem foi VETADO não passou pelo preparar(), logo não está na
+    # Campanha_Bombas e ficava só com o serial — justamente o cliente sobre o
+    # qual o gestor mais precisa de contexto, porque é o que ele pode
+    # reverter. Com `bq`, busca o nome direto na view.
+    if bq is not None:
+        faltam = [cod for cod in set(entrada) | set(previa) if cod not in parque]
+        if faltam:
+            for r_ in bq.query(f"""
+                SELECT cliente_cigam_pagante AS codigo,
+                       CAST(serial_equipamento AS STRING) AS serial,
+                       ANY_VALUE(bomba_nome) AS nome
+                FROM `{PROJECT_ID}.gold.bombas_alocadas`
+                WHERE cliente_cigam_pagante IN UNNEST(@cods)
+                  AND serial_equipamento IS NOT NULL
+                GROUP BY 1, 2
+            """, job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ArrayQueryParameter("cods", "STRING", faltam)
+                 ])).result():
+                d = parque.setdefault(r_.codigo,
+                                      {"seriais": set(), "equip": {},
+                                       "terceiros": set(), "adimplentes": 0,
+                                       "sistemas": set()})
+                d["seriais"].add(r_.serial)
+                d["equip"].setdefault(r_.serial, r_.nome or "")
 
     desfecho = {}
     for l in io.ler_aba(p1, "Campanha_Auditoria", obrigatoria=False):
@@ -804,10 +882,9 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
                         else str(r.get("seriais") or "")),
             # "NOME (serial)" quando o snapshot tem o nome; só o serial quando
             # veio da régua, que não carrega essa coluna.
-            "equipamentos_nomes": ("; ".join(
-                f"{n} ({s})" for s, n in sorted(parque[cod]["equip"].items(),
-                                                key=lambda x: x[1]))
-                if cod in parque and parque[cod]["equip"] else ""),
+            "equipamentos_nomes": _nomes_equip(parque.get(cod),
+                                               p.get("nome_cliente")
+                                               or r.get("cliente") or ""),
             "em_terceiro": ("; ".join(sorted(parque[cod]["terceiros"]))
                             if cod in parque else ""),
             "sistema_com_adimplente": (parque[cod]["adimplentes"]
@@ -885,7 +962,7 @@ def resumo_por_gerente(c, gc, escrever: bool = True) -> dict:
     return {"linhas": linhas}
 
 
-def enviar_resumo_gestores(c, gc, enviar_fn=None, criterio: str = "",
+def enviar_resumo_gestores(c, gc, bq=None, enviar_fn=None, criterio: str = "",
                            copia_gestao=(), so_para: str = None) -> list:
     """Manda o relatório a cada gestor. Caminho PRÓPRIO, não passa pelo disparar.
 
@@ -901,7 +978,7 @@ def enviar_resumo_gestores(c, gc, enviar_fn=None, criterio: str = "",
     from IPython.display import HTML, display
     import template
 
-    dados = resumo_por_gerente(c, gc, escrever=False)["linhas"]
+    dados = resumo_por_gerente(c, gc, bq=bq, escrever=False)["linhas"]
     p1 = io.abrir(gc, ID_DESTINO)
     _, emails = _mapa_gestores(p1)
 
