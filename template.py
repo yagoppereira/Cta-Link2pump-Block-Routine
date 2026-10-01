@@ -701,3 +701,162 @@ def montar_email_gestor(gerente: str, linhas: list, campanha,
         "html": html, "texto": texto,
         "cobrados": len(cobrados), "vetados": len(vetados),
     }
+
+
+# ============================================================================
+# E-MAIL DE REVISÃO INTERNA — Excelência Operacional e CS
+# ============================================================================
+#
+# Terceiro formato, e o mais curto dos três. O aviso ao cliente pede
+# pagamento; o relatório ao gestor pede ciência; este pede AÇÃO, e por isso
+# diz logo o que fazer, onde, e até quando.
+#
+# Os dois times recebem a mesma estrutura com perguntas diferentes:
+#   Excelência Operacional  o cliente deve e não tem bomba alocada — é erro
+#                           de alocação? preencha o cliente_id correto
+#   CS                      o cliente deve e o parque está parado — é churn?
+
+CORPO_INTERNO = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1a2e;line-height:1.55;max-width:860px">
+<p>{saudacao},</p>
+<p>{abertura}</p>
+{destaque}
+<p><strong>O que precisamos:</strong> {pedido}</p>
+<p>A planilha está em <a href="{link}" style="color:#382fd8">{aba}</a>.
+Preencha a coluna <strong>{coluna}</strong> e o seu nome em
+<strong>conferido_por</strong>.</p>
+{tabela}
+<p style="font-size:12px;color:#6b7280;margin-top:20px">
+Estes clientes <strong>não</strong> receberam aviso de cobrança nesta rodada —
+ficaram de fora justamente por causa da dúvida acima. {rodape}</p>
+{assinatura}
+</div>"""
+
+
+def _num_br(v) -> float:
+    """Aceita "4.162,80" e "4162.80". Os dados vêm do Sheets em pt-BR, e
+    float() direto estoura — já aconteceu no painel e na reconciliação."""
+    import re as _re
+    t = _re.sub(r"[^\d,.\-]", "", str(v if v not in (None, "") else 0))
+    if not t:
+        return 0.0
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return 0.0
+
+
+def _tabela_interna(linhas: list, colunas: list) -> str:
+    th = ('padding:7px 9px;background:#1a1a2e;color:#19e098;font-weight:bold;'
+          'font-size:11px;border:1px solid #1a1a2e;white-space:nowrap')
+    td = ('padding:7px 9px;border:1px solid #d3d1c7;font-size:12px;'
+          'white-space:nowrap')
+    cab = "".join(f'<th style="{th};text-align:{a}">{r}</th>'
+                  for _, r, a in colunas)
+    corpo = []
+    for i, l in enumerate(linhas):
+        fundo = "#ffffff" if i % 2 == 0 else "#f7f7f4"
+        cel = []
+        for campo, _, al in colunas:
+            v = l.get(campo)
+            if campo in ("em_atraso", "total", "recorrente"):
+                txt = brl(_num_br(v))
+            else:
+                txt = "—" if v in (None, "") else str(v)
+            cel.append(f'<td style="{td};text-align:{al}">{txt}</td>')
+        corpo.append(f'<tr style="background:{fundo}">' + "".join(cel) + "</tr>")
+    return ('<table cellpadding="0" cellspacing="0" role="presentation" '
+            'style="border-collapse:collapse;width:100%;margin:14px 0">'
+            f'<thead><tr>{cab}</tr></thead><tbody>{"".join(corpo)}</tbody></table>')
+
+
+def montar_email_interno(tipo: str, linhas: list, campanha, link: str = "",
+                         prazo: str = "") -> dict:
+    """tipo: 'alocacao' (Excelência Operacional) ou 'churn' (CS)."""
+    total = sum(_num_br(l.get("em_atraso") or l.get("total")) for l in linhas)
+
+    if tipo == "alocacao":
+        cfg = dict(
+            saudacao="Olá, time de Excelência Operacional",
+            titulo="Clientes com dívida recente e SEM bomba alocada",
+            abertura=(
+                "Estes clientes têm dívida vencida recente e passariam na régua "
+                "de bloqueio, mas não têm nenhuma bomba alocada no sistema — "
+                "então não há o que bloquear, e eles ficam fora da cobrança."),
+            pedido=("confirmar se é erro de alocação. Se o cliente tiver "
+                    "equipamento em operação, informe o <strong>cliente_id</strong> "
+                    "correto para que ele entre na próxima rodada."),
+            coluna="cliente_id_validado", aba="Triagem_Sem_Alocacao",
+            rodape=("Enquanto a alocação não existir, a régua não consegue nem "
+                    "avaliá-los."),
+            colunas=[("codigo", "Código", "left"), ("cliente", "Cliente", "left"),
+                     ("em_atraso", "Em aberto", "right"),
+                     ("frequencia_propria", "Meses", "center"),
+                     ("vencimento_mais_antigo", "Desde", "center"),
+                     ("segmento", "Segmento", "left")],
+        )
+    else:
+        cfg = dict(
+            saudacao="Olá, time de CS",
+            titulo="Clientes com dívida recente e parque PARADO",
+            abertura=(
+                "Estes clientes têm dívida vencida recente e bomba alocada, mas "
+                "não registram abastecimento na janela monitorada. Deixar de "
+                "usar e deixar de pagar ao mesmo tempo costuma anteceder o "
+                "cancelamento."),
+            pedido=("avaliar se é churn. Marque <strong>ativo</strong>, "
+                    "<strong>em contato</strong> ou <strong>churn</strong>, e "
+                    "acione o cliente se fizer sentido."),
+            coluna="avaliacao_cs", aba="Revisao_CS_Churn",
+            rodape=("Não foram cobrados porque bloquear equipamento parado não "
+                    "interrompe operação nenhuma — a conversa aqui é de "
+                    "retenção, não de cobrança."),
+            colunas=[("codigo", "Código", "left"), ("cliente", "Cliente", "left"),
+                     ("em_atraso", "Em aberto", "right"),
+                     ("bombas", "Bombas", "center"),
+                     ("ultima_utilizacao", "Último uso", "center"),
+                     ("recorrente", "Recorrente/mês", "right")],
+        )
+
+    celula = ("padding:12px 16px;background:#1a1a2e;color:#ffffff;"
+              "vertical-align:middle;font-family:Arial,Helvetica,sans-serif")
+    rot = "font-size:11px;color:#19e098;letter-spacing:.5px;text-transform:uppercase"
+    destaque = (
+        '<table cellpadding="0" cellspacing="0" role="presentation" '
+        'style="border-collapse:collapse;width:100%;margin:16px 0"><tr>'
+        f'<td style="{celula}"><div style="{rot}">Para revisar</div>'
+        f'<div style="font-size:26px;font-weight:bold">{len(linhas)}</div>'
+        f'<div style="font-size:11px;color:#a9b0c0">cliente(s)</div></td>'
+        f'<td style="{celula};border-left:1px solid #3a3a52">'
+        f'<div style="{rot}">Dívida envolvida</div>'
+        f'<div style="font-size:26px;font-weight:bold;white-space:nowrap">'
+        f'{brl(total)}</div></td>'
+        + (f'<td style="{celula};border-left:1px solid #3a3a52">'
+           f'<div style="{rot}">Retorno até</div>'
+           f'<div style="font-size:22px;font-weight:bold;white-space:nowrap">'
+           f'{prazo}</div></td>' if prazo else "")
+        + '</tr></table>')
+
+    logo = (f'<img src="cid:{LOGO_CID}" alt="Cta Smart" width="150" '
+            f'style="display:block;border:0">' if LOGO_PATH else "")
+    assinatura = ASSINATURA_HTML.strip() or ASSINATURA_PADRAO.format(
+        logo=logo, remetente_nome=REMETENTE_NOME,
+        remetente_cargo=REMETENTE_CARGO, site=SITE)
+
+    html = CORPO_INTERNO.format(
+        saudacao=cfg["saudacao"], abertura=cfg["abertura"], destaque=destaque,
+        pedido=cfg["pedido"], link=link or "#", aba=cfg["aba"],
+        coluna=cfg["coluna"],
+        tabela=_tabela_interna(linhas, cfg["colunas"]),
+        rodape=cfg["rodape"], assinatura=assinatura)
+
+    texto = "\n".join(
+        [cfg["titulo"], "", f"{len(linhas)} cliente(s), {brl(total)}.", ""]
+        + [f"  {l.get('codigo')} {str(l.get('cliente'))[:34]:<34} "
+           f"{brl(_num_br(l.get('em_atraso')))}" for l in linhas])
+
+    return {"assunto": f"{cfg['titulo']} — {len(linhas)} cliente(s) "
+                       f"({campanha.id_campanha})",
+            "html": html, "texto": texto, "clientes": len(linhas),
+            "total": total, "aba": cfg["aba"]}
