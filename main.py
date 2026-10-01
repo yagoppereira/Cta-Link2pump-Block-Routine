@@ -63,6 +63,7 @@ ABA_LOG = "Campanha_Log"
 ABA_TRIAGEM = "Triagem"
 ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
 ABA_TRIAGEM_ANTIGA = "Triagem_Divida_Antiga"
+ABA_CHURN = "Revisao_CS_Churn"
 ABA_EXCECOES = "Nunca_Notificar"
 ABA_CAMPANHAS = "Campanhas"
 ABA_PAINEL_CAMPANHAS = "Painel_Campanhas"
@@ -440,7 +441,7 @@ def criar_painel_campanhas(gc):
 ABA_RESUMO = "Campanhas_Resumo"
 
 
-def auditar_titulos(c, gc, bq, escrever: bool = True) -> dict:
+def auditar_titulos(c, gc, bq, escrever: bool = True, desde=None) -> dict:
     """O que aconteceu com CADA título da campanha, com data e motivo.
 
     Substitui a comparação com a base inteira, que era um erro de desenho: a
@@ -479,6 +480,26 @@ def auditar_titulos(c, gc, bq, escrever: bool = True) -> dict:
     if not congelados:
         raise RuntimeError(f"Nada em '{ABA_TITULOS}' para {c.id_campanha}.")
 
+    # JANELA. Comeca no aviso desta campanha, mas o titulo congelado pode ter
+    # sido pago numa rodada anterior: a mesma divida atravessa campanhas.
+    # Leonardo Leal pagou R$ 5.035 em 08 e 09/09 e Aguiar R$ 793,56 em 04/09;
+    # com a janela abrindo em 21/09 os dois saiam como SEM MOVIMENTO, embora o
+    # dinheiro tivesse entrado.
+    inicio = desde or c.data_envio
+    if desde is None:
+        from datetime import date as _date
+        datas = [str(l.get("data_envio") or "").strip()[:10]
+                 for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
+                 if str(l.get("id_campanha") or "").strip() == c.id_campanha
+                 and str(l.get("data_envio") or "").strip()]
+        if datas:
+            a_, m_, d_ = min(datas).split("-")
+            congelada = _date(int(a_), int(m_), int(d_))
+            if congelada < inicio:
+                print(f"  janela recuada para {congelada:%d/%m/%Y} "
+                      f"(data congelada na previa)")
+                inicio = congelada
+
     ids = sorted({str(l.get("codigoLancamento")
                       or l.get("codigolancamento") or "").strip()
                   for l in congelados} - {""})
@@ -505,10 +526,10 @@ def auditar_titulos(c, gc, bq, escrever: bool = True) -> dict:
         WHEN STARTS_WITH(COALESCE(l.codigoPortador,''),'X9') THEN 'BAIXA CONTABIL'
         ELSE CONCAT('OUTRO (', COALESCE(l.codigoPortador,'?'), ')')
       END AS natureza
-    FROM `{PROJECT_ID}.silver_pier.lancamentos_enriquecidos` l
+    FROM `{PROJECT_ID}.silver.lancamentos_receber` l
     WHERE l.codigoTipo = 'E' AND l.situacao IN ('L','U','J')
       AND l.codigoPartida IN UNNEST(@ids)
-      AND SAFE.PARSE_DATE('%d/%m/%Y', l.data) >= DATE '{c.data_envio:%Y-%m-%d}'
+      AND SAFE.PARSE_DATE('%d/%m/%Y', l.data) >= DATE '{inicio:%Y-%m-%d}'
     ORDER BY 2, 3
     """
     eventos = [dict(r) for r in bq.query(sql, job_config=bigquery.QueryJobConfig(
@@ -1016,6 +1037,80 @@ def enviar_resumo_gestores(c, gc, bq=None, enviar_fn=None, criterio: str = "",
                       "enviado": enviar_fn is not None, **msg})
 
     if enviar_fn is None:
+        print(f"\n  PRÉVIA — nada enviado. Para mandar, passe enviar_fn.")
+    return saida
+
+
+def enviar_revisao_interna(c, gc, enviar_fn=None, para_eo=None, para_cs=None,
+                           prazo: str = "", copia=()) -> list:
+    """Manda as duas listas de revisão paralela: alocação e churn.
+
+    São clientes que passaram em TODOS os critérios de dívida e ficaram de
+    fora da campanha só pelo estado do equipamento. A cobrança não os alcança,
+    mas cada um aponta um problema que outro time resolve:
+
+      sem alocação   pode ser erro de cadastro — a dívida existe e o
+                     equipamento também, só não estão ligados
+      parque parado  pode ser churn em formação — parou de usar e parou de
+                     pagar ao mesmo tempo
+
+    Caminho próprio, como o dos gestores: nada disso passa pela trava do
+    disparo ao cliente. Sem `enviar_fn` é prévia.
+    """
+    from IPython.display import HTML, display
+    import template
+
+    p1 = io.abrir(gc, ID_DESTINO)
+    link = f"https://docs.google.com/spreadsheets/d/{ID_DESTINO}/edit"
+
+    blocos = [("alocacao", ABA_TRIAGEM_REGRA, para_eo,
+               "Excelência Operacional"),
+              ("churn", ABA_CHURN, para_cs, "CS")]
+
+    saida = []
+    for tipo, aba, destino, time in blocos:
+        linhas = [l for l in io.ler_aba(p1, aba, obrigatoria=False)
+                  if str(l.get("codigo") or l.get("codigo_cliente") or "").strip()]
+        if not linhas:
+            print(f"  {time}: '{aba}' vazia — nada a revisar.")
+            continue
+
+        # Já conferido não volta para a fila: o time preenche a coluna e some
+        # da próxima leva, senão o e-mail repete sempre os mesmos nomes e
+        # deixa de ser lido.
+        col = "cliente_id_validado" if tipo == "alocacao" else "avaliacao_cs"
+        pendentes = [l for l in linhas if not str(l.get(col) or "").strip()]
+        ja = len(linhas) - len(pendentes)
+        if not pendentes:
+            print(f"  {time}: todos os {len(linhas)} já conferidos.")
+            continue
+
+        msg = template.montar_email_interno(tipo, pendentes, c,
+                                            link=f"{link}", prazo=prazo)
+        if not destino:
+            print(f"  {time}: SEM destinatário — passe para_eo= / para_cs= "
+                  f"({len(pendentes)} cliente[s] pendente[s])")
+            saida.append({"time": time, "enviado": False, **msg})
+            continue
+
+        if enviar_fn is None:
+            print(f"\n{'='*70}\nPARA: {destino}"
+                  + (f"   CC: {', '.join(copia)}" if copia else "")
+                  + f"\nASSUNTO: {msg['assunto']}"
+                  + (f"\n({ja} já conferido[s], fora desta lista)" if ja else "")
+                  + f"\n{'='*70}")
+            display(HTML(msg["html"]))
+        else:
+            enviar_fn(types.SimpleNamespace(
+                codigo_cliente=tipo, nome_cliente=time,
+                para=[destino], cc=list(copia),
+                assunto=msg["assunto"], html=msg["html"], texto=msg["texto"]))
+            print(f"  {time} -> {destino}  ({len(pendentes)} pendente(s), "
+                  f"R$ {msg['total']:,.2f})")
+        saida.append({"time": time, "destino": destino,
+                      "enviado": enviar_fn is not None, **msg})
+
+    if enviar_fn is None and saida:
         print(f"\n  PRÉVIA — nada enviado. Para mandar, passe enviar_fn.")
     return saida
 
@@ -1575,10 +1670,21 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
         for r in elegivel.itertuples():
             print(f"     {r.codigo} {str(r.cliente)[:30]:<30} {r.status_acordo}")
 
-    dentro = df[qualificado.reindex(df.index, fill_value=False)
-                & (df.usa_equipamento == True)]
-    sem_uso = df[qualificado.reindex(df.index, fill_value=False)
-                 & (df.usa_equipamento.isna())]
+    # TRÊS destinos, não dois. Todos passaram nos critérios de dívida; o que
+    # muda é o estado do equipamento:
+    #
+    #   usa_equipamento True   bomba alocada e abastecendo  -> CAMPANHA
+    #   usa_equipamento NaN    sem alocação                 -> Excelência Op.
+    #   usa_equipamento False  alocada, sem uso na janela   -> CS (churn)
+    #
+    # O terceiro grupo caía fora sem ir para aba nenhuma. São clientes com
+    # dívida recente cujo parque está parado — exatamente o perfil de churn, e
+    # o sinal mais barato que existe para o CS agir antes do cancelamento.
+    apto = qualificado.reindex(df.index, fill_value=False)
+    dentro = df[apto & (df.usa_equipamento == True)]
+    sem_alocacao = df[apto & (df.usa_equipamento.isna())]
+    sem_uso_recente = df[apto & (df.usa_equipamento == False)]
+    sem_uso = sem_alocacao                      # nome antigo, ainda usado abaixo
     so_pelo_grupo = df[passou_grupo
                        & (df.frequencia_propria < freq_propria_minima)]
 
@@ -1629,7 +1735,8 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
             passou_frequencia=int(qualificado.sum()),
             fora_divida_antiga=len(so_divida_antiga),
             fora_freq_propria=len(so_pelo_grupo),
-            sem_alocacao=len(sem_uso),
+            sem_alocacao=len(sem_alocacao),
+            sem_uso_recente=len(sem_uso_recente),
             entram=len(dentro),
             valor_entram=round(float(dentro.em_atraso.astype(float).sum()), 2),
             valor_sem_alocacao=round(float(sem_uso.em_atraso.astype(float).sum()), 2)
@@ -1641,7 +1748,27 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
         saida = dentro.copy()
         saida.insert(0, "acao", "")          # em branco = entra
         io.escrever_aba(p1, ABA_INPUT, saida)
-        io.escrever_aba(p1, ABA_TRIAGEM_REGRA, sem_uso)
+        # Abas de REVISÃO PARALELA. Cada uma tem uma coluna para o time
+        # preencher — é por ela que a informação volta para cá.
+        import pandas as _pd
+        if len(sem_alocacao):
+            a = sem_alocacao.copy()
+            a.insert(0, "cliente_id_validado", "")   # Excelência Operacional
+            a.insert(1, "conferido_por", "")
+            io.escrever_aba(p1, ABA_TRIAGEM_REGRA, a)
+        else:
+            io.escrever_aba(p1, ABA_TRIAGEM_REGRA,
+                            _pd.DataFrame(columns=["cliente_id_validado"]))
+
+        if len(sem_uso_recente):
+            b = sem_uso_recente.copy()
+            b.insert(0, "avaliacao_cs", "")          # ativo / churn / em contato
+            b.insert(1, "conferido_por", "")
+            io.escrever_aba(p1, ABA_CHURN, b)
+            print(f"  {len(sem_uso_recente)} com bomba alocada e SEM USO em "
+                  f"{dias_uso}d (R$ "
+                  f"{sem_uso_recente.em_atraso.astype(float).sum():,.2f}) "
+                  f"-> '{ABA_CHURN}', avaliação do CS")
         io.escrever_aba(p1, ABA_TRIAGEM_ANTIGA, so_divida_antiga)
         print(f"\n'{ABA_INPUT}': {len(saida)} candidato(s). Preencha `acao` "
               f"só para EXCLUIR alguém, com o motivo.")
