@@ -64,6 +64,7 @@ ABA_TRIAGEM = "Triagem"
 ABA_TRIAGEM_REGRA = "Triagem_Sem_Alocacao"
 ABA_TRIAGEM_ANTIGA = "Triagem_Divida_Antiga"
 ABA_CHURN = "Revisao_CS_Churn"
+ABA_REANALISE = "Reanalise_Dados"
 ABA_EXCECOES = "Nunca_Notificar"
 ABA_CAMPANHAS = "Campanhas"
 ABA_PAINEL_CAMPANHAS = "Painel_Campanhas"
@@ -1041,8 +1042,124 @@ def enviar_resumo_gestores(c, gc, bq=None, enviar_fn=None, criterio: str = "",
     return saida
 
 
-def enviar_revisao_interna(c, gc, enviar_fn=None, para_eo=None, para_cs=None,
-                           prazo: str = "", copia=()) -> list:
+def levantamento_reanalise(c, gc, bq, escrever: bool = True) -> dict:
+    """Monta a BASE para o time de dados reanalisar, não uma lista de tarefas.
+
+    A contradição que motiva o pedido: estes clientes são cobrados por
+    Licenciamento e Aluguel — cobranças que só existem se houver equipamento —
+    e não têm nenhuma bomba alocada no nome deles. Medido hoje: 12 dos maiores
+    somam R$ 522 mil nessa situação, e 11 deles sem nenhum cadastro irmão com
+    bomba.
+
+    Ou a bomba está atribuída a outro CNPJ, ou a cobrança é indevida. Os dois
+    são problema de dado, e nenhum se resolve pela cobrança.
+
+    Devolve, por cliente, as pistas que permitem testar as hipóteses:
+      cobrado_por        natureza das faturas recentes
+      irmaos_com_bomba   outro cadastro da mesma raiz de CNPJ tem parque?
+      como_local         a bomba está no nome dele com outro pagante?
+      mesmo_sistema      quem mais paga pelo cliente_id dele
+    """
+    import pandas as pd
+
+    sql = f"""
+    WITH emp AS (
+      SELECT codigo, nomeCompleto,
+             SUBSTR(REGEXP_REPLACE(COALESCE(cnpjCpf,''), r'\\D',''),1,8) AS raiz
+      FROM `{PROJECT_ID}.bronze.cigam__empresas`
+      WHERE divisao.codigoDivisao IN ('10','11','12','90') AND codigo != '000679'
+    ),
+    cb AS (SELECT DISTINCT cliente_cigam_pagante AS codigo
+           FROM `{PROJECT_ID}.gold.bombas_alocadas`),
+    base AS (
+      SELECT e.codigo, e.raiz, e.nomeCompleto AS cliente,
+             ROUND(SUM(t.saldo), 2) AS em_aberto,
+             COUNT(DISTINCT DATE_TRUNC(t.dataVencimento, MONTH)) AS meses,
+             MIN(t.dataVencimento) AS desde,
+             STRING_AGG(DISTINCT cc.DESCRICAO ORDER BY cc.DESCRICAO) AS cobrado_por
+      FROM `{PROJECT_ID}.silver.titulos_cigam` t
+      JOIN emp e ON e.codigo = t.codigoEmpresa
+      LEFT JOIN cb ON cb.codigo = e.codigo
+      LEFT JOIN `{PROJECT_ID}.bronze.cigam__cadastro_conta_financeira` cc
+        ON cc.codigoConta = t.codigoConta
+      WHERE t.saldo > 0
+        AND t.dataVencimento < CURRENT_DATE('America/Sao_Paulo')
+        AND cb.codigo IS NULL
+      GROUP BY 1, 2, 3
+      HAVING meses >= @meses_min
+    )
+    SELECT
+      b.codigo, SUBSTR(b.cliente, 1, 38) AS cliente, b.em_aberto, b.meses,
+      b.desde, b.cobrado_por,
+      (SELECT COUNT(DISTINCT e2.codigo) FROM emp e2 JOIN cb ON cb.codigo = e2.codigo
+       WHERE e2.raiz = b.raiz) AS irmaos_com_bomba,
+      (SELECT STRING_AGG(DISTINCT CONCAT(g.cliente_cigam_pagante, ' paga ',
+              CAST(g.serial_equipamento AS STRING)) LIMIT 4)
+       FROM `{PROJECT_ID}.gold.bombas_alocadas` g
+       WHERE g.cliente_cigam_local = b.codigo) AS como_local,
+      (SELECT STRING_AGG(DISTINCT CAST(g.cliente_id AS STRING) LIMIT 3)
+       FROM `{PROJECT_ID}.gold.bombas_alocadas` g
+       JOIN emp e3 ON e3.codigo = g.cliente_cigam_pagante
+       WHERE e3.raiz = b.raiz) AS sistemas_do_grupo
+    FROM base b
+    ORDER BY b.em_aberto DESC
+    """
+    linhas = [dict(r) for r in bq.query(sql, job_config=bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter(
+            "meses_min", "INT64", 3)])).result()]
+
+    recorrente = [l for l in linhas
+                  if any(p in (l["cobrado_por"] or "")
+                         for p in ("Licenciamento", "Aluguel"))]
+    total = sum(l["em_aberto"] for l in linhas)
+    print(f"{len(linhas)} cliente(s) com dívida recorrente e SEM bomba alocada, "
+          f"R$ {total:,.2f}")
+    print(f"  {len(recorrente)} são cobrados por Licenciamento ou Aluguel — "
+          f"cobrança que pressupõe equipamento")
+    print(f"  {sum(1 for l in linhas if l['como_local'])} aparecem como LOCAL "
+          f"de bomba paga por outro CNPJ")
+    print(f"  {sum(1 for l in linhas if (l['irmaos_com_bomba'] or 0) > 0)} têm "
+          f"cadastro irmão com parque")
+
+    if escrever:
+        io.escrever_aba(io.abrir(gc, ID_DESTINO), ABA_REANALISE,
+                        pd.DataFrame(linhas))
+    return {"linhas": linhas, "total": total}
+
+
+def enviar_reanalise(c, gc, bq, enviar_fn=None, para=None, copia=()) -> dict:
+    """Manda o levantamento ao time de dados. Sem `enviar_fn` é prévia."""
+    from IPython.display import HTML, display
+    import template
+
+    lev = levantamento_reanalise(c, gc, bq, escrever=enviar_fn is not None)
+    linhas = lev["linhas"]
+    if not linhas:
+        print("  nada a reanalisar.")
+        return {}
+
+    link = f"https://docs.google.com/spreadsheets/d/{ID_DESTINO}/edit"
+    msg = template.montar_email_reanalise(linhas, c, link=link, aba=ABA_REANALISE)
+
+    if enviar_fn is None or not para:
+        print(f"\n{'='*70}\nPARA: {para or '(defina para=)'}"
+              + (f"   CC: {', '.join(copia)}" if copia else "")
+              + f"\nASSUNTO: {msg['assunto']}\n{'='*70}")
+        display(HTML(msg["html"]))
+        print("\n  PRÉVIA — nada enviado.")
+        return msg
+
+    enviar_fn(types.SimpleNamespace(
+        codigo_cliente="reanalise", nome_cliente="Inteligência de Dados",
+        para=[para], cc=list(copia),
+        assunto=msg["assunto"], html=msg["html"], texto=msg["texto"]))
+    print(f"  enviado para {para} — {msg['clientes']} cliente(s), "
+          f"R$ {msg['total']:,.2f}")
+    return msg
+
+
+def enviar_revisao_interna(c, gc, bq=None, enviar_fn=None, para_eo=None,
+                           para_cs=None, prazo: str = "", copia=()) -> list:
     """Manda as duas listas de revisão paralela: alocação e churn.
 
     São clientes que passaram em TODOS os critérios de dívida e ficaram de
@@ -1062,6 +1179,50 @@ def enviar_revisao_interna(c, gc, enviar_fn=None, para_eo=None, para_cs=None,
 
     p1 = io.abrir(gc, ID_DESTINO)
     link = f"https://docs.google.com/spreadsheets/d/{ID_DESTINO}/edit"
+
+    # PARQUE de cada cliente, inclusive quando ele aparece só como LOCAL.
+    #
+    # O grupo da EO é "sem bomba como pagante", e a bomba pode existir com
+    # outro CNPJ pagando — é justamente o erro de alocação que eles procuram.
+    # Sem mostrar o parque, a lista vira um pedido de investigação do zero; com
+    # ele, a EO vê na hora se o equipamento existe e sob qual vínculo.
+    #
+    # Isso já pegou um caso: Trans ABC 001709 e 002944 estavam na lista de
+    # "sem alocação" com bomba alocada e abastecendo no dia anterior.
+    parque = {}
+    if bq is not None:
+        cods = [_codigo(l.get("codigo") or l.get("codigo_cliente"))
+                for aba in (ABA_TRIAGEM_REGRA, ABA_CHURN)
+                for l in io.ler_aba(p1, aba, obrigatoria=False)]
+        cods = sorted({x for x in cods if x})
+        if cods:
+            for r in bq.query(f"""
+                SELECT
+                  b.cliente_cigam_pagante AS pagante,
+                  b.cliente_cigam_local   AS local,
+                  CAST(b.serial_equipamento AS STRING) AS serial,
+                  ANY_VALUE(b.bomba_nome) AS nome,
+                  ANY_VALUE(CAST(b.cliente_id AS STRING)) AS cliente_id,
+                  MAX(u.ultimo) AS ultimo_uso
+                FROM `{PROJECT_ID}.gold.bombas_alocadas` b
+                LEFT JOIN (
+                  SELECT CAST(bomba_id AS STRING) AS bomba_id, MAX(data) AS ultimo
+                  FROM `{PROJECT_ID}.silver.abastecimentos_validos`
+                  WHERE data >= DATE_SUB(CURRENT_DATE('America/Sao_Paulo'),
+                                         INTERVAL 400 DAY)
+                  GROUP BY 1) u
+                  ON u.bomba_id = CAST(b.bomba_id AS STRING)
+                WHERE b.cliente_cigam_pagante IN UNNEST(@c)
+                   OR b.cliente_cigam_local IN UNNEST(@c)
+                GROUP BY 1, 2, 3
+            """, job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ArrayQueryParameter("c", "STRING", cods)])).result():
+                for cod, papel in ((r.pagante, "paga"), (r.local, "local")):
+                    if cod in cods:
+                        parque.setdefault(cod, []).append(
+                            {"serial": r.serial, "nome": r.nome,
+                             "cliente_id": r.cliente_id, "papel": papel,
+                             "ultimo_uso": r.ultimo_uso})
 
     blocos = [("alocacao", ABA_TRIAGEM_REGRA, para_eo,
                "Excelência Operacional"),
@@ -1084,6 +1245,18 @@ def enviar_revisao_interna(c, gc, enviar_fn=None, para_eo=None, para_cs=None,
         if not pendentes:
             print(f"  {time}: todos os {len(linhas)} já conferidos.")
             continue
+
+        for l in pendentes:
+            bombas = parque.get(_codigo(l.get("codigo")
+                                        or l.get("codigo_cliente")), [])
+            l["parque"] = "; ".join(
+                f"{b['nome'] or b['serial']} ({b['serial']}"
+                + (f", {b['papel']}" if b["papel"] == "local" else "")
+                + (f", usou {b['ultimo_uso']:%d/%m}" if b["ultimo_uso"] else
+                   ", sem uso")
+                + ")"
+                for b in sorted(bombas, key=lambda x: str(x["nome"] or "")))
+            l["tem_bomba"] = "sim" if bombas else "não"
 
         msg = template.montar_email_interno(tipo, pendentes, c,
                                             link=f"{link}", prazo=prazo)
