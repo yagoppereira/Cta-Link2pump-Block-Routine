@@ -764,7 +764,9 @@ def _tabela_interna(linhas: list, colunas: list) -> str:
                 txt = brl(_num_br(v))
             else:
                 txt = "—" if v in (None, "") else str(v)
-            cel.append(f'<td style="{td};text-align:{al}">{txt}</td>')
+            estilo = (('padding:7px 9px;border:1px solid #d3d1c7;'
+                       'font-size:11px') if campo == "parque" else td)
+            cel.append(f'<td style="{estilo};text-align:{al}">{txt}</td>')
         corpo.append(f'<tr style="background:{fundo}">' + "".join(cel) + "</tr>")
     return ('<table cellpadding="0" cellspacing="0" role="presentation" '
             'style="border-collapse:collapse;width:100%;margin:14px 0">'
@@ -793,8 +795,8 @@ def montar_email_interno(tipo: str, linhas: list, campanha, link: str = "",
             colunas=[("codigo", "Código", "left"), ("cliente", "Cliente", "left"),
                      ("em_atraso", "Em aberto", "right"),
                      ("frequencia_propria", "Meses", "center"),
-                     ("vencimento_mais_antigo", "Desde", "center"),
-                     ("segmento", "Segmento", "left")],
+                     ("tem_bomba", "Tem bomba?", "center"),
+                     ("parque", "Equipamento encontrado", "left")],
         )
     else:
         cfg = dict(
@@ -814,7 +816,7 @@ def montar_email_interno(tipo: str, linhas: list, campanha, link: str = "",
                     "retenção, não de cobrança."),
             colunas=[("codigo", "Código", "left"), ("cliente", "Cliente", "left"),
                      ("em_atraso", "Em aberto", "right"),
-                     ("bombas", "Bombas", "center"),
+                     ("parque", "Equipamento", "left"),
                      ("ultima_utilizacao", "Último uso", "center"),
                      ("recorrente", "Recorrente/mês", "right")],
         )
@@ -860,3 +862,113 @@ def montar_email_interno(tipo: str, linhas: list, campanha, link: str = "",
                        f"({campanha.id_campanha})",
             "html": html, "texto": texto, "clientes": len(linhas),
             "total": total, "aba": cfg["aba"]}
+
+
+CORPO_REANALISE = """<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1a1a2e;line-height:1.55;max-width:900px">
+<p>Olá, time de Inteligência de Dados,</p>
+
+<p>Encontramos uma contradição no cadastro que afeta a régua de cobrança e
+provavelmente outras análises. Trago a base para vocês reanalisarem, não uma
+lista de correções — a causa pode ser diferente em cada caso.</p>
+
+{destaque}
+
+<p><strong>A contradição:</strong> {n_recorrente} destes clientes são cobrados
+por <strong>Licenciamento ou Aluguel</strong> — cobranças que só existem se
+houver equipamento em operação — e nenhum deles tem bomba alocada no próprio
+CNPJ. Ou o equipamento está atribuído a outro cadastro, ou a cobrança não
+deveria existir. Os dois são problema de dado.</p>
+
+<p><strong>Hipóteses que a base permite testar:</strong></p>
+<ul style="font-size:13px;line-height:1.7">
+<li><strong>Equipamento sob outro CNPJ do mesmo grupo</strong> — {n_irmaos}
+cliente(s) têm cadastro irmão, pela raiz do CNPJ, com parque alocado.</li>
+<li><strong>Vínculo invertido</strong> — {n_local} aparece(m) como local da
+bomba, com outro CNPJ registrado como pagante.</li>
+<li><strong>Cobrança órfã</strong> — contrato ativo no CIGAM para equipamento
+que saiu de operação e não foi encerrado.</li>
+<li><strong>Cadastro duplicado</strong> — o mesmo cliente em dois códigos, um
+com a dívida e outro com a bomba.</li>
+</ul>
+
+<p>A planilha completa está em <a href="{link}" style="color:#382fd8">{aba}</a>,
+com as colunas <code>cobrado_por</code>, <code>irmaos_com_bomba</code>,
+<code>como_local</code> e <code>sistemas_do_grupo</code> para cada cliente.</p>
+
+{tabela}
+
+<p style="font-size:12px;color:#6b7280;margin-top:20px">
+Estes clientes <strong>não</strong> são cobrados pela régua automática — sem
+equipamento alocado não há bloqueio possível, então ficam fora. O impacto não
+é só a cobrança parada: enquanto o vínculo não existir, nenhuma análise que
+cruze cliente e equipamento enxerga esses {n} casos.</p>
+{assinatura}
+</div>"""
+
+
+def montar_email_reanalise(linhas: list, campanha, link: str = "",
+                           aba: str = "Reanalise_Dados", limite: int = 15) -> dict:
+    """E-mail para o time de dados: contradição, hipóteses e base.
+
+    Diferente dos outros três. O aviso pede pagamento, o do gestor pede
+    ciência, o da EO pede ação. Este pede ANÁLISE — então entrega o conflito
+    de dados, as hipóteses que ele comporta e de onde vêm os números, em vez
+    de uma lista de nomes para alguém conferir um a um.
+    """
+    total = sum(_num_br(l.get("em_aberto")) for l in linhas)
+    rec = [l for l in linhas
+           if any(p in str(l.get("cobrado_por") or "")
+                  for p in ("Licenciamento", "Aluguel"))]
+    n_irmaos = sum(1 for l in linhas if _num_br(l.get("irmaos_com_bomba")) > 0)
+    n_local = sum(1 for l in linhas if str(l.get("como_local") or "").strip())
+
+    celula = ("padding:12px 16px;background:#1a1a2e;color:#ffffff;"
+              "vertical-align:middle;font-family:Arial,Helvetica,sans-serif")
+    rot = "font-size:11px;color:#19e098;letter-spacing:.5px;text-transform:uppercase"
+    destaque = (
+        '<table cellpadding="0" cellspacing="0" role="presentation" '
+        'style="border-collapse:collapse;width:100%;margin:16px 0"><tr>'
+        f'<td style="{celula}"><div style="{rot}">Clientes</div>'
+        f'<div style="font-size:26px;font-weight:bold">{len(linhas)}</div>'
+        f'<div style="font-size:11px;color:#a9b0c0">com dívida recorrente e '
+        f'sem bomba</div></td>'
+        f'<td style="{celula};border-left:1px solid #3a3a52">'
+        f'<div style="{rot}">Dívida sem lastro de parque</div>'
+        f'<div style="font-size:26px;font-weight:bold;white-space:nowrap">'
+        f'{brl(total)}</div></td></tr></table>')
+
+    colunas = [("codigo", "Código", "left"), ("cliente", "Cliente", "left"),
+               ("em_aberto", "Em aberto", "right"),
+               ("meses", "Meses", "center"),
+               ("cobrado_por", "Cobrado por", "left"),
+               ("irmaos_com_bomba", "Irmãos c/ bomba", "center")]
+    mostra = sorted(linhas, key=lambda l: -_num_br(l.get("em_aberto")))[:limite]
+    tabela = _tabela_interna(mostra, colunas)
+    if len(linhas) > limite:
+        tabela += (f'<p style="font-size:11px;color:#6b7280">mostrando os '
+                   f'{limite} maiores; os {len(linhas) - limite} restantes '
+                   f'estão na planilha.</p>')
+
+    logo = (f'<img src="cid:{LOGO_CID}" alt="Cta Smart" width="150" '
+            f'style="display:block;border:0">' if LOGO_PATH else "")
+    assinatura = ASSINATURA_HTML.strip() or ASSINATURA_PADRAO.format(
+        logo=logo, remetente_nome=REMETENTE_NOME,
+        remetente_cargo=REMETENTE_CARGO, site=SITE)
+
+    html = CORPO_REANALISE.format(
+        destaque=destaque, n_recorrente=len(rec), n_irmaos=n_irmaos,
+        n_local=n_local, n=len(linhas), link=link or "#", aba=aba,
+        tabela=tabela, assinatura=assinatura)
+
+    texto = "\n".join(
+        [f"Dívida recorrente sem bomba alocada — {len(linhas)} cliente(s), "
+         f"{brl(total)}", "",
+         f"{len(rec)} cobrados por Licenciamento/Aluguel sem equipamento no "
+         f"próprio CNPJ.", ""]
+        + [f"  {l.get('codigo')} {str(l.get('cliente'))[:34]:<34} "
+           f"{brl(_num_br(l.get('em_aberto')))}" for l in mostra])
+
+    return {"assunto": f"Reanálise: {len(linhas)} cliente(s) com cobrança "
+                       f"recorrente e sem equipamento vinculado",
+            "html": html, "texto": texto, "clientes": len(linhas),
+            "total": total}
