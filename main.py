@@ -701,8 +701,20 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
 
     mapa, _ = _mapa_gestores(p1)
 
+    previa = {_codigo(l.get("codigo_cliente")): l
+              for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
+              if str(l.get("id_campanha") or "").strip() == c.id_campanha}
+    entrada = {_codigo(l.get("codigo") or l.get("codigo_cliente")): l
+               for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False)}
+    if not previa and not entrada:
+        raise RuntimeError(f"Nem '{ABA_PREVIA}' nem '{ABA_INPUT}' têm dados.")
+
     # CARTEIRA da Base_Clientes (planilha 2). A coluna `vendedor` da
     # Contatos_Emails é o `representante` do CIGAM e só serve de reserva.
+    #
+    # Vem DEPOIS de previa/entrada: a resolução por CNPJ precisa dos
+    # documentos dos clientes da campanha, e tentar antes dava
+    # UnboundLocalError.
     vendedor_de, cart = {}, None
     try:
         import vendedores as _v
@@ -714,21 +726,19 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
         print(f"  (Base_Clientes não lida: {type(exc).__name__}; "
               f"vendedor virá da Contatos_Emails)")
 
-    # A Base_Clientes NÃO tem coluna de código — só CNPJ. Sem resolver por
+    # A Base_Clientes NÃO tem coluna de código, só CNPJ. Sem resolver por
     # CNPJ, `por_codigo` vem vazio e todo mundo cai no fallback da
-    # Contatos_Emails, que é o `representante` do CIGAM. Foi o que fez 13 de
-    # 13 clientes virem da fonte errada.
+    # Contatos_Emails, que é o `representante` do CIGAM.
     doc_de = {}
     for l in io.ler_aba(p1, ABA_CONTATOS, obrigatoria=False):
         cod = _codigo(l.get("codigo_cliente"))
         if cod:
             doc_de.setdefault(cod, l.get("cnpj_cpf"))
-    for fonte in (previa.values() if isinstance(previa, dict) else [],):
-        for l in fonte:
-            cod = _codigo(l.get("codigo_cliente"))
-            if cod and not doc_de.get(cod):
-                doc_de[cod] = l.get("cnpj_cpf")
-    for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False):
+    for l in previa.values():
+        cod = _codigo(l.get("codigo_cliente"))
+        if cod and not doc_de.get(cod):
+            doc_de[cod] = l.get("cnpj_cpf")
+    for l in entrada.values():
         cod = _codigo(l.get("codigo") or l.get("codigo_cliente"))
         if cod and not doc_de.get(cod):
             doc_de[cod] = l.get("cnpj")
@@ -739,9 +749,9 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
         for cod, doc in doc_de.items():
             if cod in vendedor_de:
                 continue
-            for k in _v._chaves_doc(doc):
-                if k in por_cnpj:
-                    vendedor_de[cod] = por_cnpj[k]
+            for ch in _v._chaves_doc(doc):
+                if ch in por_cnpj:
+                    vendedor_de[cod] = por_cnpj[ch]
                     achados += 1
                     break
         print(f"  carteira por CNPJ: {achados} cliente(s) resolvido(s)")
@@ -757,13 +767,6 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
         print(f"  {reserva} cliente(s) SEM carteira na Base_Clientes — usei o "
               f"`representante` do CIGAM, que pode estar desatualizado.")
 
-    previa = {_codigo(l.get("codigo_cliente")): l
-              for l in io.ler_aba(p1, ABA_PREVIA, obrigatoria=False)
-              if str(l.get("id_campanha") or "").strip() == c.id_campanha}
-    entrada = {_codigo(l.get("codigo") or l.get("codigo_cliente")): l
-               for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False)}
-    if not previa and not entrada:
-        raise RuntimeError(f"Nem '{ABA_PREVIA}' nem '{ABA_INPUT}' têm dados.")
 
     # EQUIPAMENTOS. Do snapshot congelado quando existe; senão das colunas da
     # régua. O gestor pediu isso e tem razão: é o parque do cliente dele que
