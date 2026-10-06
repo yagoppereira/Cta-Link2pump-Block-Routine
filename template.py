@@ -589,18 +589,32 @@ def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
             # equipamento, porque a lista corrida fica ilegível a partir de
             # três — e o gestor lê isto para reconhecer a operação, não para
             # conferir número.
+            # `equips`, não `itens`: a variável do laço se chama `itens`, e
+            # reaproveitar o nome aqui sobrescrevia a lista de CLIENTES no meio
+            # da iteração. O for terminava na primeira volta e o len(itens) do
+            # título passava a contar equipamentos — daí "2 cliente(s)" com um
+            # cliente só, que tinha 2 bombas.
             nomes = str(l.get("equipamentos_nomes") or "").strip()
-            itens = [x.strip() for x in nomes.split(";") if x.strip()] or \
-                    [x.strip() for x in str(l.get("seriais") or "").split(";")
-                     if x.strip()]
+            equips = [x.strip() for x in nomes.split(";") if x.strip()] or \
+                     [x.strip() for x in str(l.get("seriais") or "").split(";")
+                      if x.strip()]
             lista = "".join(
                 f'<div style="font-size:11px;color:#374151">• {x}</div>'
-                for x in itens[:8])
-            if len(itens) > 8:
+                for x in equips[:8])
+            if len(equips) > 8:
                 lista += (f'<div style="font-size:11px;color:#6b7280">'
-                          f'e mais {len(itens) - 8}</div>')
+                          f'e mais {len(equips) - 8}</div>')
+
+            # "2 de 14 equipamentos" distingue o cliente pequeno do grande com
+            # pendência parcial — o vendedor pediu isso para reconhecer conta
+            # estratégica sem abrir outra tela.
+            total_eq = l.get("equipamentos_total")
+            de_quantos = (f" de {total_eq}" if total_eq
+                          and str(total_eq) != str(eq) else "")
             extra += (f'<div style="font-size:11px;color:#374151;margin-top:4px">'
-                      f'<strong>{eq} equipamento(s)</strong></div>{lista}')
+                      f'<strong>{eq}{de_quantos} equipamento(s)</strong>'
+                      + (' com pendência' if de_quantos else '')
+                      + f'</div>{lista}')
         if l.get("em_terceiro"):
             extra += (f'<div style="font-size:11px;color:#b45309">'
                       f'em operação de terceiro: {l["em_terceiro"]}</div>')
