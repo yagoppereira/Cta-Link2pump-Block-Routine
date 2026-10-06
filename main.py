@@ -808,6 +808,25 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
     # Campanha_Bombas e ficava só com o serial — justamente o cliente sobre o
     # qual o gestor mais precisa de contexto, porque é o que ele pode
     # reverter. Com `bq`, busca o nome direto na view.
+    # PARQUE TOTAL do cliente, não só o que entrou na campanha. O vendedor
+    # pediu para distinguir "2 de 14 equipamentos" de "2 de 2": a primeira é
+    # conta grande com pendência parcial, a segunda é cliente pequeno inteiro
+    # em atraso. A diferença muda a abordagem e não dava para ver no quadro.
+    total_eq = {}
+    if bq is not None:
+        todos = sorted(set(entrada) | set(previa))
+        if todos:
+            for r_ in bq.query(f"""
+                SELECT cliente_cigam_pagante AS codigo,
+                       COUNT(DISTINCT serial_equipamento) AS n
+                FROM `{PROJECT_ID}.gold.bombas_alocadas`
+                WHERE cliente_cigam_pagante IN UNNEST(@c)
+                  AND serial_equipamento IS NOT NULL
+                GROUP BY 1
+            """, job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ArrayQueryParameter("c", "STRING", todos)])).result():
+                total_eq[r_.codigo] = r_.n
+
     if bq is not None:
         faltam = [cod for cod in set(entrada) | set(previa) if cod not in parque]
         if faltam:
@@ -907,6 +926,7 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
                         else str(r.get("seriais") or "")),
             # "NOME (serial)" quando o snapshot tem o nome; só o serial quando
             # veio da régua, que não carrega essa coluna.
+            "equipamentos_total": total_eq.get(cod, ""),
             "equipamentos_nomes": _nomes_equip(parque.get(cod),
                                                p.get("nome_cliente")
                                                or r.get("cliente") or ""),
