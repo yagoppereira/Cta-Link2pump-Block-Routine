@@ -557,6 +557,55 @@ def _destaque_gestor(cobrados: list, vetados: list, bloqueio: str = "") -> str:
             f'<tr>{cel}</tr></table>')
 
 
+def _locais_do_contrato(texto) -> list:
+    """Tira a localidade do texto livre da observação do contrato.
+
+    O campo é heterogêneo. Convivem três formatos:
+        "CTA Pedestal Simples - Catalão, GO"
+        "PRODUTO: CTA PEDESTAL DUPLO\nCONTRATO: 12.201\n
+         CIDADE INSTALACAO: NOVA SANTA RITA, RS\nDATA INSTALACAO: 06/01/2026"
+        "1 CTA PEDESTAL SIMPLES - IRUPÃ (SP)"
+
+    e, no meio deles, observações que não são local nenhum — carência,
+    número de pedido, link do Pipefy. Jogar o texto cru no relatório
+    colocaria parágrafos inteiros dentro da célula.
+
+    Devolve só os trechos que parecem "Cidade, UF" ou "Cidade (UF)".
+    """
+    import re as _re
+    if not texto:
+        return []
+    achados, vistos = [], set()
+    for linha in _re.split(r"[\n;]+", str(texto)):
+        linha = linha.strip()
+        if not linha:
+            continue
+        rotulo = _re.match(r"(?i)^(cidade\s*(de\s*)?instala\w*|cidade)\s*:\s*(.+)$",
+                           linha)
+        if rotulo:
+            trecho = rotulo.group(3).strip()
+        else:
+            m = _re.search(r"([A-ZÀ-Ú][\w\sÀ-ú.\'-]{2,40}?\s*[,(]\s*[A-Z]{2}\)?)\s*$",
+                           linha)
+            if not m:
+                continue
+            trecho = m.group(1).strip()
+            # tira o prefixo do produto: "CTA Pedestal Simples - Catalão, GO"
+            if " - " in linha:
+                depois = linha.rsplit(" - ", 1)[-1].strip()
+                if _re.search(r"[,(]\s*[A-Z]{2}\)?$", depois):
+                    trecho = depois
+        # "Cidade: Jaguapitã, PR" -> "Jaguapitã, PR". O rótulo pode vir no
+        # meio da linha, depois do produto, e aí o regex de cima não pegou.
+        trecho = _re.sub(r"(?i)^.*?\bcidade\s*(de\s*)?(instala\w*)?\s*:\s*",
+                         "", trecho)
+        trecho = _re.sub(r"\s+", " ", trecho).strip(" .-")
+        if trecho and trecho.upper() not in vistos:
+            vistos.add(trecho.upper())
+            achados.append(trecho)
+    return achados[:3]
+
+
 def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
     th = ('padding:7px 9px;background:#f0efe9;color:#1a1a2e;font-weight:bold;'
           'font-size:11px;border:1px solid #d3d1c7;text-align:left')
@@ -611,10 +660,76 @@ def _bloco_vendedor(vendedor: str, itens: list, vetado: bool = False) -> str:
             total_eq = l.get("equipamentos_total")
             de_quantos = (f" de {total_eq}" if total_eq
                           and str(total_eq) != str(eq) else "")
+
+            # Porte da conta: licenças ativas e recorrente mensal. É o que
+            # distingue "cliente pequeno todo em atraso" de "conta grande com
+            # duas bombas pendentes" sem precisar abrir outra tela.
+            porte = []
+            if l.get("licencas_ativas"):
+                porte.append(f"{l['licencas_ativas']} licença(s) ativa(s)")
+            if _num_br(l.get("recorrente_mes")):
+                porte.append(f"{brl(_num_br(l['recorrente_mes']))}/mês")
+
             extra += (f'<div style="font-size:11px;color:#374151;margin-top:4px">'
                       f'<strong>{eq}{de_quantos} equipamento(s)</strong>'
                       + (' com pendência' if de_quantos else '')
+                      + (f' · {" · ".join(porte)}' if porte else "")
                       + f'</div>{lista}')
+        # LOCAL do contrato. Só quando NÃO há equipamento alocado: aí o nome
+        # da bomba não existe, e a cidade do contrato é a única pista de onde
+        # o equipamento está — que é o que o vendedor usa para reconhecer.
+        # Com bomba alocada o nome já carrega a localidade e repetir polui.
+        # O QUE ESTÁ SENDO COBRADO. Associa o título vencido ao equipamento
+        # pelo contrato, e diz o nível de certeza em vez de afirmar sempre:
+        #
+        #   1 equipamento     inequívoco — é aquele
+        #   contrato único    o débito é de um contrato só; se houver cidade
+        #                     na observação, ela identifica o ponto
+        #   vários            lista os contratos sem cruzar com as bombas,
+        #                     porque o contrato não guarda o serial e casar
+        #                     por cidade acerta 99 de 510
+        cd = l.get("contratos_devendo") or []
+        if cd:
+            n_eq = int(float(l.get("equipamentos") or 0) or 0)
+            partes = []
+            for ct in cd[:4]:
+                desc = str(ct.get("descricao") or "contrato").strip().title()
+                serial = ct.get("serial_provavel")
+                conf = ct.get("confianca") or ""
+                # O equipamento vem com a CONFIANÇA ao lado. Palpite rotulado
+                # serve; palpite apresentado como fato faz o vendedor dizer ao
+                # cliente que vai bloquear a bomba errada.
+                alvo = (f" → serial {serial}" if serial else "")
+                marca = (f" <span style=\'color:#059669\'>[{conf}]</span>"
+                         if serial and conf in ("inequívoca", "alta")
+                         else f" <span style=\'color:#b45309\'>[{conf}]</span>"
+                         if conf and conf != "nenhuma" else "")
+                partes.append(
+                    f"{desc} {ct.get('contrato')}{alvo}{marca}"
+                    + f" — {ct.get('titulos')} tít."
+                    + (f" · {ct.get('porque')}" if ct.get("porque") else ""))
+            certeza = ("" if n_eq == 1 or len(cd) > 1
+                       else "")
+            extra += (f'<div style="font-size:11px;color:#374151;margin-top:4px">'
+                      f'<strong>Cobrança referente a:</strong></div>'
+                      + "".join(f'<div style="font-size:11px;color:#374151">'
+                                f'• {p}</div>' for p in partes)
+                      + (f'<div style="font-size:11px;color:#6b7280">'
+                         f'e mais {len(cd) - 4} contrato(s)</div>'
+                         if len(cd) > 4 else ""))
+            sem_alvo = [x for x in cd if not x.get("serial_provavel")]
+            if sem_alvo and len(sem_alvo) < len(cd):
+                extra += (f'<div style="font-size:11px;color:#6b7280">'
+                          f'{len(sem_alvo)} contrato(s) sem equipamento '
+                          f'identificável</div>')
+
+        if l.get("locais_contrato") and not str(l.get("equipamentos_nomes") or "").strip():
+            locais = _locais_do_contrato(l["locais_contrato"])
+            if locais:
+                extra += (f'<div style="font-size:11px;color:#374151;'
+                          f'margin-top:3px">contrato em: '
+                          f'{"; ".join(locais)}</div>')
+
         if l.get("em_terceiro"):
             extra += (f'<div style="font-size:11px;color:#b45309">'
                       f'em operação de terceiro: {l["em_terceiro"]}</div>')
