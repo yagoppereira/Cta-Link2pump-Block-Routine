@@ -662,6 +662,23 @@ def _mapa_gestores(p1):
     return mapa, emails
 
 
+def _associar_contratos(contratos: list, dados_parque) -> list:
+    """Aponta o equipamento provável de cada contrato inadimplente.
+
+    A regra mora em associacao.py e devolve o grau de confiança junto. Aqui só
+    traduzimos o parque para o formato que ela espera.
+    """
+    if not contratos:
+        return []
+    try:
+        import associacao
+    except ImportError:
+        return contratos
+    bombas = [{"serial": s, "nome": n}
+              for s, n in (dados_parque or {}).get("equip", {}).items()]
+    return associacao.associar(contratos, bombas)
+
+
 def _nomes_equip(dados, nome_cliente: str) -> str:
     """'Fazenda Boa Vista - S10 (21130); Sede - Arla (21370)'.
 
@@ -812,7 +829,35 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
     # pediu para distinguir "2 de 14 equipamentos" de "2 de 2": a primeira é
     # conta grande com pendência parcial, a segunda é cliente pequeno inteiro
     # em atraso. A diferença muda a abordagem e não dava para ver no quadro.
-    total_eq = {}
+    # DUAS fontes, porque medem coisas diferentes:
+    #
+    #   bombas_alocadas   o que está LIGADO ao cliente no app
+    #   contratos ativos  o que ele PAGA — licenciamento e aluguel
+    #
+    # A diferença é o sinal. Medido na base: 1.507 clientes batem, 654 têm
+    # mais equipamento que licença, 135 o contrário, e 173 têm licenciamento
+    # ativo com ZERO equipamento alocado. O vendedor quer reconhecer conta
+    # grande; a divergência entre as duas diz, de quebra, onde o cadastro
+    # está furado.
+    #
+    # O código do contrato tem zeros à esquerda e o da view não — a
+    # documentação do modelo avisa para tirar dos DOIS lados.
+    # TÍTULO -> EQUIPAMENTO. O vendedor quer saber qual bomba está sendo
+    # cobrada, não quantas o cliente tem. O elo é o codigoContrato do título,
+    # e ele existe em 2.260 dos 3.161 títulos vencidos.
+    #
+    # Mas o contrato NÃO guarda o serial: a descrição é genérica
+    # ("LICENCIAMENTO DE SOFTWARE") e o serial só aparece na observação de
+    # forma indireta, pela cidade. Testei casar cidade do contrato com nome da
+    # bomba: 99 de 510 pares. Sinal real, confiança insuficiente — errar aqui
+    # é dizer ao cliente que vai bloquear o equipamento errado.
+    #
+    # Então o relatório diz o que SABE, em três níveis:
+    #   1 equipamento        inequívoco (142 clientes)
+    #   contrato único       o título é daquele contrato (35 clientes)
+    #   vários de ambos      lista contratos e bombas sem cruzar (81)
+    contratos_devendo = {}
+    total_eq, contratos = {}, {}
     if bq is not None:
         todos = sorted(set(entrada) | set(previa))
         if todos:
@@ -826,6 +871,63 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
             """, job_config=bigquery.QueryJobConfig(query_parameters=[
                     bigquery.ArrayQueryParameter("c", "STRING", todos)])).result():
                 total_eq[r_.codigo] = r_.n
+
+            # contratos COM TÍTULO VENCIDO, e o que cada um descreve
+            for r_ in bq.query(f"""
+                SELECT
+                  t.codigoEmpresa AS codigo,
+                  t.codigoContrato,
+                  ANY_VALUE(c.descricao) AS descricao,
+                  ANY_VALUE(c.observacao) AS observacao,
+                  COUNT(*) AS titulos,
+                  ROUND(SUM(t.saldo), 2) AS saldo
+                FROM `{PROJECT_ID}.silver.titulos_cigam` t
+                LEFT JOIN `{PROJECT_ID}.bronze.cigam__contratos` c
+                  ON c.codigoContrato = t.codigoContrato
+                WHERE t.saldo > 0
+                  AND t.dataVencimento < CURRENT_DATE('America/Sao_Paulo')
+                  AND t.codigoEmpresa IN UNNEST(@c)
+                  AND NULLIF(TRIM(COALESCE(t.codigoContrato,'')),'') IS NOT NULL
+                GROUP BY 1, 2
+            """, job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ArrayQueryParameter("c", "STRING", todos)])).result():
+                contratos_devendo.setdefault(r_.codigo, []).append({
+                    "contrato": r_.codigoContrato,
+                    "descricao": r_.descricao,
+                    "observacao": r_.observacao,
+                    "titulos": r_.titulos, "saldo": r_.saldo})
+
+            for r_ in bq.query(f"""
+                SELECT LPAD(LTRIM(cliente.codigo, '0'), 6, '0') AS codigo,
+                       COUNTIF(UPPER(descricao) LIKE '%LICENCIAMENTO%') AS licencas,
+                       COUNTIF(UPPER(descricao) LIKE '%ALUGUEL%') AS alugueis,
+                       ROUND(SUM(SAFE_DIVIDE(SAFE_CAST(valorParcela AS FLOAT64),
+                                 NULLIF(SAFE_CAST(periodicidade AS FLOAT64), 0))), 2)
+                         AS recorrente_mes,
+                       -- LOCAL do contrato. Metade das observações traz
+                       -- cidade e tipo de pedestal; a outra metade traz
+                       -- carência, número de pedido ou link do Pipefy. O
+                       -- filtro fica no texto: só entra o que tem vírgula
+                       -- seguida de UF ou "(UF)", que é o formato de
+                       -- localidade usado no cadastro.
+                       STRING_AGG(DISTINCT
+                         IF(REGEXP_CONTAINS(COALESCE(observacao,''),
+                              r'(?i)(,\\s*[A-Z]{{2}}\\b|\\([A-Z]{{2}}\\))'),
+                            TRIM(observacao), NULL)
+                         ORDER BY IF(REGEXP_CONTAINS(COALESCE(observacao,''),
+                              r'(?i)(,\\s*[A-Z]{{2}}\\b|\\([A-Z]{{2}}\\))'),
+                            TRIM(observacao), NULL)
+                         LIMIT 4) AS locais
+                FROM `{PROJECT_ID}.bronze.cigam__contratos`
+                WHERE situacaoContrato = 'A'
+                  AND LPAD(LTRIM(cliente.codigo, '0'), 6, '0') IN UNNEST(@c)
+                GROUP BY 1
+            """, job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ArrayQueryParameter("c", "STRING", todos)])).result():
+                contratos[r_.codigo] = {"licencas": r_.licencas,
+                                        "alugueis": r_.alugueis,
+                                        "recorrente": r_.recorrente_mes,
+                                        "locais": r_.locais}
 
     if bq is not None:
         faltam = [cod for cod in set(entrada) | set(previa) if cod not in parque]
@@ -927,6 +1029,11 @@ def resumo_por_gerente(c, gc, bq=None, escrever: bool = True) -> dict:
             # "NOME (serial)" quando o snapshot tem o nome; só o serial quando
             # veio da régua, que não carrega essa coluna.
             "equipamentos_total": total_eq.get(cod, ""),
+            "licencas_ativas": contratos.get(cod, {}).get("licencas", ""),
+            "recorrente_mes": contratos.get(cod, {}).get("recorrente", ""),
+            "locais_contrato": contratos.get(cod, {}).get("locais") or "",
+            "contratos_devendo": _associar_contratos(
+                contratos_devendo.get(cod, []), parque.get(cod)),
             "equipamentos_nomes": _nomes_equip(parque.get(cod),
                                                p.get("nome_cliente")
                                                or r.get("cliente") or ""),
