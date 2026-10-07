@@ -550,36 +550,98 @@ def auditar_titulos(c, gc, bq, escrever: bool = True, desde=None) -> dict:
             f"Sem codigoLancamento em '{ABA_TITULOS}' nem faturas em "
             f"'{ABA_INPUT}' — não dá para auditar título a título.")
 
+    # CHAVE: cliente + fatura + vencimento, NÃO codigoLancamento.
+    #
+    # O id não sobrevive ao ciclo de vida do título. Quando a dívida vira X90
+    # cria-se um lançamento novo; para receber, o write-off é DELETADO e o
+    # pagamento vai no lançamento original. O snapshot guarda o id que existia
+    # no congelamento, e ele pode não existir mais.
+    #
+    # Foi o caso da NF 20254615 da Auto Viação Porto Rico: congelada como
+    # 399659 (o X90), paga como 279654 (o original). A auditoria procurava o
+    # 399659, não achava baixa, e reportava SEM MOVIMENTO para R$ 500 pagos
+    # mais R$ 146,85 de juros.
+    #
+    # Fatura sozinha é ambígua: 1,32 lançamentos por chave, porque parcelas da
+    # mesma fatura se repetem. Com o vencimento cai para 1,08.
     sql = f"""
+    WITH alvo AS (
+      SELECT codigoEmpresa, fatura, venc FROM UNNEST(@chaves)
+    ),
+    -- todos os lançamentos de título que casam com o que foi congelado,
+    -- incluindo os já liquidados (tipo 'c') e os que mudaram de id
+    titulos AS (
+      SELECT DISTINCT
+        l.codigoEmpresa, CAST(l.fatura AS STRING) AS fatura,
+        l.dataVencimento AS venc,
+        CAST(l.codigoLancamento AS STRING) AS id
+      FROM `{PROJECT_ID}.silver.lancamentos_receber` l
+      JOIN alvo a
+        ON a.codigoEmpresa = l.codigoEmpresa
+       AND a.fatura = CAST(l.fatura AS STRING)
+       AND a.venc = l.dataVencimento
+      WHERE l.codigoTipo IN ('R', 'c')
+    )
     SELECT
-      l.codigoPartida AS codigoLancamento,
-      l.codigoEmpresa AS codigo_cliente,
-      SAFE.PARSE_DATE('%d/%m/%Y', l.data) AS data_baixa,
-      l.codigoPortador AS portador,
-      SAFE_CAST(l.valor AS FLOAT64) AS valor,
-      NULLIF(TRIM(l.complementoHistorico), '') AS motivo,
-      l.situacao AS situacao,
+      t.codigoEmpresa AS codigo_cliente,
+      t.fatura,
+      t.venc,
+      SAFE.PARSE_DATE('%d/%m/%Y', b.data) AS data_baixa,
+      b.codigoPortador AS portador,
+      b.situacao,
+      SAFE_CAST(b.valor AS FLOAT64) AS valor,
+      NULLIF(TRIM(b.complementoHistorico), '') AS motivo,
       CASE
-        WHEN l.situacao = 'J'                                THEN 'JUROS'
-        WHEN STARTS_WITH(COALESCE(l.codigoPortador,''),'C')
-          OR STARTS_WITH(COALESCE(l.codigoPortador,''),'I')
-          OR STARTS_WITH(COALESCE(l.codigoPortador,''),'Y')  THEN 'PAGO'
-        WHEN l.codigoPortador = 'X30'                        THEN 'ABATIDO'
-        WHEN STARTS_WITH(COALESCE(l.codigoPortador,''),'X9') THEN 'BAIXA CONTABIL'
-        ELSE CONCAT('OUTRO (', COALESCE(l.codigoPortador,'?'), ')')
+        WHEN b.situacao = 'J'                                THEN 'JUROS'
+        WHEN STARTS_WITH(COALESCE(b.codigoPortador,''),'C')
+          OR STARTS_WITH(COALESCE(b.codigoPortador,''),'I')
+          OR STARTS_WITH(COALESCE(b.codigoPortador,''),'Y')  THEN 'PAGO'
+        WHEN b.codigoPortador = 'X30'                        THEN 'ABATIDO'
+        WHEN STARTS_WITH(COALESCE(b.codigoPortador,''),'X9') THEN 'BAIXA CONTABIL'
+        ELSE CONCAT('OUTRO (', COALESCE(b.codigoPortador,'?'), ')')
       END AS natureza
-    FROM `{PROJECT_ID}.silver.lancamentos_receber` l
-    WHERE l.codigoTipo = 'E' AND l.situacao IN ('L','U','J')
-      AND l.codigoPartida IN UNNEST(@ids)
-      AND SAFE.PARSE_DATE('%d/%m/%Y', l.data) >= DATE '{inicio:%Y-%m-%d}'
-    ORDER BY 2, 3
+    FROM titulos t
+    JOIN `{PROJECT_ID}.silver.lancamentos_receber` b
+      ON b.codigoPartida = t.id
+    WHERE b.codigoTipo = 'E' AND b.situacao IN ('L','U','J')
+      AND SAFE.PARSE_DATE('%d/%m/%Y', b.data) >= DATE '{inicio:%Y-%m-%d}'
     """
-    eventos = [dict(r) for r in bq.query(sql, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ArrayQueryParameter("ids","STRING",ids)])).result()]
+    # Chaves do que foi congelado. O vencimento vem como date ou texto,
+    # conforme a aba — normaliza para dd/mm/aaaa, que é o formato do campo
+    # dataVencimento na lancamentos_receber.
+    def _venc_br(v):
+        t = str(v or "").strip()[:10]
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", t)
+        if m:
+            return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
+        return t
+
+    chaves, por_chave_congelado = [], {}
+    for t in congelados:
+        cod = _codigo(t.get("codigo_cliente"))
+        fat = str(t.get("doc") or t.get("fatura") or "").split("/")[0].strip()
+        venc = _venc_br(t.get("dataVencimento") or t.get("datavencimento"))
+        if not (cod and fat and venc):
+            continue
+        k = (cod, fat, venc)
+        chaves.append({"codigoEmpresa": cod, "fatura": fat, "venc": venc})
+        por_chave_congelado[k] = t
+
+    if not chaves:
+        raise RuntimeError(
+            f"Sem cliente+fatura+vencimento em '{ABA_TITULOS}' para "
+            f"{c.id_campanha}. A auditoria casa por essas três colunas.")
+
+    eventos = [dict(r) for r in bq.query(
+        sql, job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ArrayQueryParameter(
+                "chaves", "STRUCT<codigoEmpresa STRING, fatura STRING, "
+                          "venc STRING>", chaves)])).result()]
 
     por_titulo = {}
     for e in eventos:
-        por_titulo.setdefault(str(e["codigoLancamento"]), []).append(e)
+        k = (_codigo(e["codigo_cliente"]), str(e["fatura"]), str(e["venc"]))
+        por_titulo.setdefault(k, []).append(e)
 
     # Acordo firmado DEPOIS do aviso: quem está na prévia passou pelo filtro,
     # logo não tinha acordo vigente quando foi avisado.
@@ -594,10 +656,10 @@ def auditar_titulos(c, gc, bq, escrever: bool = True, desde=None) -> dict:
         print(f"  (acordos não lidos: {type(exc).__name__})")
 
     linhas, resumo = [], {}
-    for t in congelados:
+    for k, t in por_chave_congelado.items():
+        cod, fat, venc = k
         tid = str(t.get("codigoLancamento") or t.get("codigolancamento") or "").strip()
-        cod = _codigo(t.get("codigo_cliente"))
-        evs = por_titulo.get(tid, [])
+        evs = por_titulo.get(k, [])
 
         if not evs:
             estado = "ACORDADO (sem baixa)" if cod in em_acordo else "SEM MOVIMENTO"
