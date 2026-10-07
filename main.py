@@ -1985,9 +1985,29 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
     # o sinal mais barato que existe para o CS agir antes do cancelamento.
     apto = qualificado.reindex(df.index, fill_value=False)
     dentro = df[apto & (df.usa_equipamento == True)]
-    sem_alocacao = df[apto & (df.usa_equipamento.isna())]
     sem_uso_recente = df[apto & (df.usa_equipamento == False)]
-    sem_uso = sem_alocacao                      # nome antigo, ainda usado abaixo
+
+    # SEM BOMBA NA VIEW tem quatro causas distintas, e tratá-las como uma só
+    # mandava 117 clientes para a Excelência Operacional revisar alocação —
+    # quando 99 deles não têm nada a revisar.
+    #
+    # Bomba BLOQUEADA perde o serial e some da bombas_alocadas. Cliente já
+    # bloqueado e ainda inadimplente não é erro de cadastro nem candidato a
+    # bloquear: é retenção ou perda, e quem trata é o CS.
+    sem_bomba = df[apto & (df.usa_equipamento.isna())]
+    destino = sem_bomba.get("destino_sem_alocacao")
+    if destino is None:
+        destino = pd.Series("investigar", index=sem_bomba.index)
+
+    com_bomba_bloqueada = sem_bomba[destino.fillna("") == "CS — bomba bloqueada"]
+    encerrados = sem_bomba[destino.fillna("") == "CS — contrato encerrado"]
+    sem_cadastro = sem_bomba[destino.fillna("") == "dados — sem bomba cadastrada"]
+    a_investigar = sem_bomba[~destino.fillna("investigar").isin(
+        ["CS — bomba bloqueada", "CS — contrato encerrado",
+         "dados — sem bomba cadastrada"])]
+
+    sem_alocacao = sem_cadastro     # só estes vão para a Excelência Operacional
+    sem_uso = sem_alocacao
     so_pelo_grupo = df[passou_grupo
                        & (df.frequencia_propria < freq_propria_minima)]
 
@@ -2040,6 +2060,9 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
             fora_freq_propria=len(so_pelo_grupo),
             sem_alocacao=len(sem_alocacao),
             sem_uso_recente=len(sem_uso_recente),
+            bomba_bloqueada=len(com_bomba_bloqueada),
+            contrato_encerrado=len(encerrados),
+            a_investigar=len(a_investigar),
             entram=len(dentro),
             valor_entram=round(float(dentro.em_atraso.astype(float).sum()), 2),
             valor_sem_alocacao=round(float(sem_uso.em_atraso.astype(float).sum()), 2)
@@ -2063,7 +2086,23 @@ def candidatos(gc, bq, freq_minima: int = 7, freq_propria_minima: int = 3,
             io.escrever_aba(p1, ABA_TRIAGEM_REGRA,
                             _pd.DataFrame(columns=["cliente_id_validado"]))
 
-        if len(sem_uso_recente):
+        if len(com_bomba_bloqueada) or len(encerrados):
+            # CS recebe os dois: já bloqueado e já encerrado. A diferença
+            # importa para a abordagem, então vai como coluna, não como aba.
+            cs = pd.concat([com_bomba_bloqueada, encerrados, sem_uso_recente])
+            cs = cs.copy()
+            cs.insert(0, "avaliacao_cs", "")
+            cs.insert(1, "conferido_por", "")
+            io.escrever_aba(p1, ABA_CHURN, cs)
+            print(f"  {len(com_bomba_bloqueada)} já com BOMBA BLOQUEADA "
+                  f"(R$ {com_bomba_bloqueada.em_atraso.astype(float).sum():,.2f}) e "
+                  f"{len(encerrados)} com CONTRATO ENCERRADO "
+                  f"(R$ {encerrados.em_atraso.astype(float).sum():,.2f}) "
+                  f"-> '{ABA_CHURN}', avaliação do CS")
+        if len(a_investigar):
+            print(f"  {len(a_investigar)} sem linha no raio-x — investigar "
+                  f"(R$ {a_investigar.em_atraso.astype(float).sum():,.2f})")
+        if len(sem_uso_recente) and not (len(com_bomba_bloqueada) or len(encerrados)):
             b = sem_uso_recente.copy()
             b.insert(0, "avaliacao_cs", "")          # ativo / churn / em contato
             b.insert(1, "conferido_por", "")
