@@ -504,10 +504,51 @@ def auditar_titulos(c, gc, bq, escrever: bool = True, desde=None) -> dict:
     ids = sorted({str(l.get("codigoLancamento")
                       or l.get("codigolancamento") or "").strip()
                   for l in congelados} - {""})
+    # RESGATE PELA FATURA. A régua grava `faturas_vencidas` na Campanha_Input;
+    # o codigoLancamento só é congelado no preparar(). Sem snapshot a
+    # auditoria ficava cega — e mesmo COM snapshot ela perde o título pago
+    # ENTRE a régua e o congelamento, porque título pago sai da titulos_cigam
+    # e nunca chega a ser congelado.
+    #
+    # A fatura sobrevive à liquidação: o lançamento continua na
+    # lancamentos_receber, só muda de tipo 'R' para 'c'. Foi assim que a NF
+    # 20254615 da Auto Viação Porto Rico (R$ 500 + R$ 146,85 de juros, pagos
+    # em 05/10) ficou invisível.
+    if not ids:
+        faturas = {}
+        for l in io.ler_aba(p1, ABA_INPUT, obrigatoria=False):
+            cod = _codigo(l.get("codigo") or l.get("codigo_cliente"))
+            fats = [f.strip() for f in
+                    str(l.get("faturas_vencidas") or "").split(";") if f.strip()]
+            if cod and fats:
+                faturas[cod] = fats
+
+        if faturas:
+            pares = [f"{cod}|{f}" for cod, fs in faturas.items() for f in fs]
+            print(f"  '{ABA_TITULOS}' sem títulos desta campanha: recuperando "
+                  f"{len(pares)} fatura(s) da régua, inclusive liquidadas.")
+            achados = list(bq.query(f"""
+                SELECT DISTINCT codigoEmpresa, CAST(fatura AS STRING) AS fatura,
+                       CAST(codigoLancamento AS STRING) AS id
+                FROM `{PROJECT_ID}.silver.lancamentos_receber`
+                WHERE codigoTipo IN ('R', 'c')
+                  AND CONCAT(codigoEmpresa, '|', CAST(fatura AS STRING))
+                      IN UNNEST(@pares)
+            """, job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ArrayQueryParameter("pares", "STRING", pares)
+                 ])).result())
+            ids = sorted({r.id for r in achados})
+            congelados = [{"id_campanha": c.id_campanha,
+                           "codigo_cliente": r.codigoEmpresa,
+                           "codigoLancamento": r.id, "doc": r.fatura,
+                           "saldo": 0, "nome_cliente": "",
+                           "dataVencimento": ""} for r in achados]
+            print(f"  {len(ids)} lançamento(s) recuperado(s) pela fatura.")
+
     if not ids:
         raise RuntimeError(
-            f"Sem codigoLancamento em '{ABA_TITULOS}' — não dá para auditar "
-            f"título a título.")
+            f"Sem codigoLancamento em '{ABA_TITULOS}' nem faturas em "
+            f"'{ABA_INPUT}' — não dá para auditar título a título.")
 
     sql = f"""
     SELECT
