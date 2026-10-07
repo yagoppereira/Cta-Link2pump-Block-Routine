@@ -566,7 +566,14 @@ def auditar_titulos(c, gc, bq, escrever: bool = True, desde=None) -> dict:
     # mesma fatura se repetem. Com o vencimento cai para 1,08.
     sql = f"""
     WITH alvo AS (
-      SELECT codigoEmpresa, fatura, venc FROM UNNEST(@chaves)
+      -- Chave concatenada, não STRUCT: o ArrayQueryParameter do cliente
+      -- Python não aceita STRUCT declarado por string de tipo, e o erro
+      -- ("is not a valid value") só aparece na execução.
+      SELECT
+        SPLIT(k, '|')[OFFSET(0)] AS codigoEmpresa,
+        SPLIT(k, '|')[OFFSET(1)] AS fatura,
+        SPLIT(k, '|')[OFFSET(2)] AS venc
+      FROM UNNEST(@chaves) AS k
     ),
     -- todos os lançamentos de título que casam com o que foi congelado,
     -- incluindo os já liquidados (tipo 'c') e os que mudaram de id
@@ -624,7 +631,7 @@ def auditar_titulos(c, gc, bq, escrever: bool = True, desde=None) -> dict:
         if not (cod and fat and venc):
             continue
         k = (cod, fat, venc)
-        chaves.append({"codigoEmpresa": cod, "fatura": fat, "venc": venc})
+        chaves.append(f"{cod}|{fat}|{venc}")
         por_chave_congelado[k] = t
 
     if not chaves:
@@ -634,9 +641,8 @@ def auditar_titulos(c, gc, bq, escrever: bool = True, desde=None) -> dict:
 
     eventos = [dict(r) for r in bq.query(
         sql, job_config=bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ArrayQueryParameter(
-                "chaves", "STRUCT<codigoEmpresa STRING, fatura STRING, "
-                          "venc STRING>", chaves)])).result()]
+            bigquery.ArrayQueryParameter("chaves", "STRING", chaves)
+         ])).result()]
 
     por_titulo = {}
     for e in eventos:
