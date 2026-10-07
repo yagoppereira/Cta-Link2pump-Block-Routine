@@ -1,9 +1,9 @@
--- SCHEMA: silver_pier, não silver.
--- Em 30/09/2026 o DW separou os dados financeiros sensíveis em schemas
--- próprios (bronze_pier, silver_pier). A lancamentos_enriquecidos foi junto;
--- a versão antiga parou de atualizar e será excluída.
--- Medido na troca: a auditoria de baixas lia 1.908 clientes no schema velho e
--- 2.082 no novo — 174 clientes e R$ 460 mil que sumiriam em silêncio.
+-- FONTE: silver.lancamentos_receber.
+-- Em 30/09/2026 o DW separou o financeiro sensível em schemas restritos.
+-- A lancamentos_receber é o recorte de recebimento (tipos
+-- R, E, c), ficou no silver e tem os mesmos dados nos tipos que usamos.
+-- É a fonte certa: mesmo conteúdo, sem o que não nos diz respeito, e sem
+-- depender de um acesso que foi criado para ser restrito.
 -- ============================================================================
 -- Base de inadimplência remontada do DW
 -- ============================================================================
@@ -78,7 +78,7 @@ WITH emp AS (
 --   normais -> silver.titulos_cigam. Conferida contra o export do CIGAM:
 --              452 de 467 clientes batem NO CENTAVO, 2.724 títulos idênticos.
 --
---   X90     -> bronze_pier.cigam__lancamentos, codigoTipo 'E', montante em `valor`.
+--   X90     -> silver.lancamentos_receber, codigoTipo 'E', montante em `valor`.
 --              Também conferido no centavo: 1.164 lançamentos / R$ 828.988,58
 --              e 2 de juros / R$ 137,99, iguais ao export.
 --
@@ -112,7 +112,7 @@ WITH emp AS (
 -- metade recebendo carta de bloqueio é a pior combinação possível.
 sob_tutela_juridica AS (
     SELECT DISTINCT codigoEmpresa
-    FROM `hip-bonito-453017-m2.silver_pier.lancamentos_enriquecidos`
+    FROM `hip-bonito-453017-m2.silver.lancamentos_receber`
     WHERE codigoPortador IN ('X91', 'X92', 'X99')
       AND SAFE_CAST(valor AS FLOAT64) > 0
 ),
@@ -130,6 +130,42 @@ abertos AS (
     FROM `hip-bonito-453017-m2.silver.titulos_cigam` t
     WHERE t.saldo > 0
       AND t.codigoEmpresa NOT IN (SELECT codigoEmpresa FROM sob_tutela_juridica)
+),
+
+-- PISTAS DE ALOCAÇÃO, para a revisão da Excelência Operacional.
+--
+-- Cliente sem bomba como PAGANTE pode mesmo não ter equipamento, ou pode ser
+-- erro de cadastro. Dois sinais distinguem, e eles pedem ações diferentes:
+--
+--   aparece como LOCAL      equipamento instalado nele, cobrado de outro CNPJ
+--                           -> 19 clientes, R$ 65.227,21. Erro provável.
+--   grupo tem bomba         um irmão de mesma raiz paga por equipamento
+--                           -> 45 clientes, R$ 331.451,66. Pode ser estrutura
+--                              legítima de grupo ou cadastro trocado.
+--
+-- Sem nenhum dos dois (163 clientes), provavelmente nunca teve equipamento —
+-- e aí não há o que a EO revisar.
+bombas_como_local AS (
+  SELECT cliente_cigam_local AS codigo,
+         COUNT(*)                                        AS bombas_no_local,
+         STRING_AGG(DISTINCT CAST(serial_equipamento AS STRING)
+                    ORDER BY CAST(serial_equipamento AS STRING) LIMIT 8)
+                                                         AS seriais_no_local,
+         STRING_AGG(DISTINCT cliente_cigam_pagante
+                    ORDER BY cliente_cigam_pagante LIMIT 5) AS pago_por
+  FROM `hip-bonito-453017-m2.gold.bombas_alocadas`
+  WHERE cliente_cigam_local IS NOT NULL
+  GROUP BY 1
+),
+
+bombas_do_grupo AS (
+  SELECT e.raiz,
+         COUNT(*)                                        AS bombas_no_grupo,
+         STRING_AGG(DISTINCT b.cliente_cigam_pagante
+                    ORDER BY b.cliente_cigam_pagante LIMIT 5) AS pagantes_do_grupo
+  FROM `hip-bonito-453017-m2.gold.bombas_alocadas` b
+  JOIN emp e ON e.codigo = b.cliente_cigam_pagante
+  GROUP BY 1
 ),
 
 -- Quem tem parque instalado: só esses contam para a frequência do grupo.
@@ -202,6 +238,33 @@ bombas_relevantes AS (
   WHERE b.cliente_cigam_pagante IN (SELECT codigo FROM divida)
 ),
 
+-- ESTADO DO PARQUE pelo raio-x. A bombas_alocadas casa bomba com equipamento
+-- pelo serial, e bomba BLOQUEADA perde o serial — some da view e o cliente
+-- aparece como "sem alocação", que é diagnóstico errado.
+--
+-- Medido nos 117 clientes sem alocação e com 3+ meses vencidos:
+--    65  contrato encerrado, sem bomba            -> saiu, caso de CS
+--    34  bomba SEM SERIAL = BLOQUEADA (61 bombas) -> já bloqueado, CS
+--    13  nunca teve bomba cadastrada              -> inteligência de dados
+--     5  sem linha no raio-x                      -> investigar
+--
+-- Cliente que já está bloqueado e segue inadimplente não é erro de cadastro
+-- nem candidato a bloqueio: é retenção ou perda, e quem trata é o CS.
+parque_raiox AS (
+  SELECT
+    codigo,
+    situacao,
+    n_bombas,
+    (SELECT COUNT(*) FROM UNNEST(equipamentos) e WHERE e.serial IS NULL)
+      AS bombas_bloqueadas,
+    (SELECT COUNT(*) FROM UNNEST(equipamentos) e WHERE e.serial IS NOT NULL)
+      AS bombas_com_serial,
+    ct_n_ativo,
+    ct_n_encerrado,
+    mrr
+  FROM `hip-bonito-453017-m2.gold.raio_x_cliente`
+),
+
 uso AS (
   SELECT br.codigo, MAX(a.data) AS ultima_utilizacao
   FROM `hip-bonito-453017-m2.silver.abastecimentos_validos` a
@@ -235,6 +298,26 @@ SELECT
   d.titulos_x90,
   d.valor_x90,
   d.so_baixa_contabil,
+  px.situacao             AS situacao_raiox,
+  px.bombas_bloqueadas,
+  px.ct_n_ativo           AS contratos_ativos,
+  px.mrr,
+  -- Destino quando NÃO há bomba alocada. Resolve aqui, perto do dado, em vez
+  -- de espalhar a regra pelo Python.
+  CASE
+    WHEN b.codigo IS NOT NULL             THEN NULL
+    WHEN px.codigo IS NULL                THEN 'investigar'
+    WHEN px.bombas_bloqueadas > 0         THEN 'CS — bomba bloqueada'
+    WHEN px.situacao = 'inativo'          THEN 'CS — contrato encerrado'
+    WHEN px.n_bombas = 0                  THEN 'dados — sem bomba cadastrada'
+    ELSE 'investigar'
+  END                     AS destino_sem_alocacao,
+  -- pistas para a revisão de alocação (vazias para quem já é pagante)
+  bl.bombas_no_local,
+  bl.seriais_no_local,
+  bl.pago_por                AS local_pago_por,
+  bg.bombas_no_grupo,
+  bg.pagantes_do_grupo,
   d.vencimento_mais_antigo,
   ROUND(rx.mrr, 2)                          AS recorrente,
 
@@ -266,4 +349,6 @@ LEFT JOIN freq_grupo f ON f.raiz = e.raiz
 LEFT JOIN parque p     ON p.codigo = d.codigo
 LEFT JOIN uso u        ON u.codigo = d.codigo
 LEFT JOIN rx           ON rx.codigo = d.codigo
+LEFT JOIN bombas_como_local bl ON bl.codigo = d.codigo
+LEFT JOIN bombas_do_grupo   bg ON bg.raiz   = e.raiz
 ORDER BY f.frequencia DESC, d.em_atraso DESC
