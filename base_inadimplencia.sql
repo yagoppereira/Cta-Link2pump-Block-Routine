@@ -1,6 +1,7 @@
 -- FONTE: silver.lancamentos_receber.
 -- Em 30/09/2026 o DW separou o financeiro sensível em schemas restritos.
--- A lancamentos_receber é o recorte de recebimento (tipos
+-- A lancamentos_enriquecidos foi para lá e carrega TUDO, inclusive contas
+-- a pagar e despesa. A lancamentos_receber é o recorte de recebimento (tipos
 -- R, E, c), ficou no silver e tem os mesmos dados nos tipos que usamos.
 -- É a fonte certa: mesmo conteúdo, sem o que não nos diz respeito, e sem
 -- depender de um acesso que foi criado para ser restrito.
