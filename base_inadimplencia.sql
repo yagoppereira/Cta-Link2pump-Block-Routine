@@ -251,20 +251,6 @@ bombas_relevantes AS (
 --
 -- Cliente que já está bloqueado e segue inadimplente não é erro de cadastro
 -- nem candidato a bloqueio: é retenção ou perda, e quem trata é o CS.
-parque_raiox AS (
-  SELECT
-    codigo,
-    situacao,
-    n_bombas,
-    (SELECT COUNT(*) FROM UNNEST(equipamentos) e WHERE e.serial IS NULL)
-      AS bombas_bloqueadas,
-    (SELECT COUNT(*) FROM UNNEST(equipamentos) e WHERE e.serial IS NOT NULL)
-      AS bombas_com_serial,
-    ct_n_ativo,
-    ct_n_encerrado,
-    mrr
-  FROM `hip-bonito-453017-m2.gold.raio_x_cliente`
-),
 
 uso AS (
   SELECT br.codigo, MAX(a.data) AS ultima_utilizacao
@@ -276,7 +262,18 @@ uso AS (
 ),
 
 rx AS (
-  SELECT codigo, mrr, situacao, segmento
+  -- Uma leitura so do raio-x. Havia duas CTEs sobre a mesma tabela, esta e
+  -- uma CTE duplicada, e o SELECT final usava o alias da que NAO estava no
+  -- join: aparece como "Unrecognized name: px" so na execucao.
+  SELECT
+    codigo, mrr, situacao, segmento, n_bombas, ct_n_ativo, ct_n_encerrado,
+    -- Bomba SEM SERIAL e bomba BLOQUEADA: ao bloquear, o equipamento e
+    -- desvinculado e o serial some, entao ela deixa de aparecer na
+    -- bombas_alocadas, que casa bomba e equipamento pelo serial.
+    (SELECT COUNT(*) FROM UNNEST(equipamentos) e WHERE e.serial IS NULL)
+      AS bombas_bloqueadas,
+    (SELECT COUNT(*) FROM UNNEST(equipamentos) e WHERE e.serial IS NOT NULL)
+      AS bombas_com_serial
   FROM `hip-bonito-453017-m2.gold.raio_x_cliente`
 )
 
@@ -299,18 +296,16 @@ SELECT
   d.titulos_x90,
   d.valor_x90,
   d.so_baixa_contabil,
-  px.situacao             AS situacao_raiox,
-  px.bombas_bloqueadas,
-  px.ct_n_ativo           AS contratos_ativos,
-  px.mrr,
+  rx.bombas_bloqueadas,
+  rx.ct_n_ativo           AS contratos_ativos,
   -- Destino quando NÃO há bomba alocada. Resolve aqui, perto do dado, em vez
   -- de espalhar a regra pelo Python.
   CASE
-    WHEN b.codigo IS NOT NULL             THEN NULL
-    WHEN px.codigo IS NULL                THEN 'investigar'
-    WHEN px.bombas_bloqueadas > 0         THEN 'CS — bomba bloqueada'
-    WHEN px.situacao = 'inativo'          THEN 'CS — contrato encerrado'
-    WHEN px.n_bombas = 0                  THEN 'dados — sem bomba cadastrada'
+    WHEN p.codigo IS NOT NULL             THEN NULL   -- tem bomba na view
+    WHEN rx.codigo IS NULL                THEN 'investigar'
+    WHEN rx.bombas_bloqueadas > 0         THEN 'CS — bomba bloqueada'
+    WHEN rx.situacao = 'inativo'          THEN 'CS — contrato encerrado'
+    WHEN rx.n_bombas = 0                  THEN 'dados — sem bomba cadastrada'
     ELSE 'investigar'
   END                     AS destino_sem_alocacao,
   -- pistas para a revisão de alocação (vazias para quem já é pagante)
