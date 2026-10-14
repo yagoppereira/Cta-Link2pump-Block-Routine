@@ -2765,10 +2765,26 @@ def reconciliar(c, gc, bq) -> dict:
     print(f"quitou: {len(quitou)} | pagou em parte: {len(parcial)} | "
           f"sem movimento: {len(mantem)}")
     if parcial:
-        print("PAGAMENTO PARCIAL — decidir um a um antes de abrir card:")
+        print("PAGAMENTO PARCIAL — NÃO entram em `mantem`, decida um a um:")
         for r in parcial:
-            print(f"   {r['codigo_cliente']} {r['nome_cliente'][:30]}: "
-                  f"{r['saldo_no_aviso']:.2f} -> {r['saldo_hoje']:.2f}")
+            antes, agora = r["saldo_no_aviso"], r["saldo_hoje"]
+            pct = (antes - agora) / antes * 100 if antes else 0
+            r["pct_pago"] = round(pct, 1)
+            # `renegociaram` é a lista de quem fechou acordo DEPOIS do aviso
+            # — quem está na prévia passou pelo filtro de acordo, então não
+            # tinha nenhum quando foi avisado.
+            r["em_acordo"] = r["codigo_cliente"] in set(renegociaram)
+            print(f"   {r['codigo_cliente']} {str(r['nome_cliente'])[:28]:<28} "
+                  f"R$ {antes:>9,.2f} -> R$ {agora:>9,.2f}  "
+                  f"({pct:4.1f}% pago)"
+                  + ("  EM ACORDO" if r["em_acordo"] else "  sem acordo"))
+        sem_acordo = [r for r in parcial if not r["em_acordo"]]
+        if sem_acordo:
+            print(f"   {len(sem_acordo)} pagou em parte e NÃO negociou — "
+                  f"pagar uma nota não suspende o bloqueio por si. Para "
+                  f"incluí-los:")
+            print(f"      codigos = [r['codigo_cliente'] "
+                  f"for r in rec['mantem'] + rec['parcial']]")
     recuperado = round(sum(r["saldo_no_aviso"] - r["saldo_hoje"]
                            for r in quitou + parcial), 2)
     if renegociaram:
@@ -2819,6 +2835,18 @@ def gerar_cards(c, gc, codigos: list, escrever: bool = True) -> list:
     """Texto dos cards, a partir do CONGELADO. `codigos` sai da reconciliação —
     esta função não decide quem bloqueia."""
     codigos = [_codigo(x) for x in codigos]
+
+    # AVISO sobre quem ficou de fora. O reconciliar separa `parcial` de
+    # `mantem`, e a célula dos cards usa só `mantem` — então pagamento parcial
+    # virava exclusão SILENCIOSA. Pagar uma nota de cinco não suspende o
+    # bloqueio; quem decide isso é você, e para decidir precisa ser avisado.
+    try:
+        p0 = io.abrir(gc, ID_DESTINO)
+        parciais = [l for l in io.ler_aba(p0, ABA_PREVIA, obrigatoria=False)
+                    if str(l.get("id_campanha") or "").strip() == c.id_campanha
+                    and _codigo(l.get("codigo_cliente")) not in codigos]
+    except Exception:
+        parciais = []
     p1 = io.abrir(gc, ID_DESTINO)
     # Normaliza os DOIS lados. A lista vem da reconciliação (já normalizada) e
     # a prévia do Sheets (sem zero à esquerda): sem isto nenhum card sairia, e
